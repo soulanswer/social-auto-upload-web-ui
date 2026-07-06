@@ -138,6 +138,10 @@ from blueprints.bilibili_bp import bilibili_bp  # noqa: E402
 app.register_blueprint(bilibili_bp)
 logger.info("[Startup] bilibili_bp registered OK")
 
+from blueprints.weibo_bp import weibo_bp  # noqa: E402
+app.register_blueprint(weibo_bp)
+logger.info("[Startup] weibo_bp registered OK")
+
 from blueprints.channels_bp import channels_bp  # noqa: E402
 app.register_blueprint(channels_bp)
 logger.info("[Startup] channels_bp registered OK")
@@ -776,6 +780,7 @@ def postVideo():
                 mini_link=mini_link,
                 mix_id=mix_id,
                 content_statement=data.get('contentStatement', ''),
+                weibo_collection=data.get('weiboCollection', ''),
                 author_statement=data.get('authorStatement', ''),
                 compilation=data.get('compilation', ''),
                 video_format=data.get('videoFormat', ''),
@@ -798,6 +803,8 @@ def postVideo():
                 bili_collection_name=data.get('biliCollectionName', ''),
                 # 视频号合集(账号级)
                 channels_collection_name=data.get('channelsCollectionName', ''),
+                # 视频号位置(平台级,空=不显示位置)
+                channels_location_name=data.get('channelsLocationName', ''),
             ))
         else:
             result = publish_fn(
@@ -832,6 +839,7 @@ def postVideo():
                 mini_link=mini_link,
                 mix_id=mix_id,
                 content_statement=data.get('contentStatement', ''),
+                weibo_collection=data.get('weiboCollection', ''),
                 author_statement=data.get('authorStatement', ''),
                 compilation=data.get('compilation', ''),
                 video_format=data.get('videoFormat', ''),
@@ -854,6 +862,8 @@ def postVideo():
                 bili_collection_name=data.get('biliCollectionName', ''),
                 # 视频号合集(账号级)
                 channels_collection_name=data.get('channelsCollectionName', ''),
+                # 视频号位置(平台级,空=不显示位置)
+                channels_location_name=data.get('channelsLocationName', ''),
             )
         if result:
             return jsonify({"code": 200, "msg": "发布任务已提交", "data": None}), 200

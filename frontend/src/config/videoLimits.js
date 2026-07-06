@@ -13,7 +13,7 @@ export const VIDEO_LIMITS = {
   iqiyi:         { minDuration: 5,    maxDuration: 3600,         maxSize: 16 * GB, maxTitleLength: Infinity },
   douyin:        { minDuration: 5,    maxDuration: 3600,         maxSize: 16 * GB, maxTitleLength: Infinity },
   baijiahao:     { minDuration: 5,    maxDuration: Infinity,     maxSize: 12 * GB, maxTitleLength: Infinity },
-  weibo:         { minDuration: 0,    maxDuration: Infinity,     maxSize: 15 * GB, maxTitleLength: Infinity },
+  weibo:         { minDuration: 0,    maxDuration: Infinity,     maxSize: 15 * GB, maxTitleLength: 30 },
   kuaishou:      { minDuration: 5,    maxDuration: 3600,         maxSize: 12 * GB, maxTitleLength: Infinity },
   bilibili:      { minDuration: 5,    maxDuration: 36000,        maxSize: 16 * GB, maxTitleLength: 80, maxDescLength: 2000 },
   xiaohongshu:   { minDuration: 5,    maxDuration: 14400,        maxSize: 20 * GB, maxTitleLength: 20 },
@@ -104,7 +104,7 @@ export function validateVideoForPlatform(platformKey, durationSec, sizeBytes) {
  * 用于标题/描述长度校验。JS 字符串的 .length 是 UTF-16 单元数（emoji 是 2），
  * 也不能直接用 codepoint 数（emoji 是 1），所以用遍历算。
  */
-function countCharsWithEmoji(s) {
+export function countCharsWithEmoji(s) {
   if (!s) return 0
   let n = 0
   for (const ch of s) {

@@ -487,6 +487,8 @@ class IqiyiPlatform(BasePlatform):
     # Form field helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+
     @staticmethod
     async def _fill_title(page, title: str):
         """Fill the video title."""
@@ -512,7 +514,8 @@ class IqiyiPlatform(BasePlatform):
         await asyncio.sleep(0.3)
 
         # 清空后输入(跨平台:Mac 用 Cmd+A,其他用 Ctrl+A)
-        await clear_and_type(page, title[:30])
+        # 传 element= 让 clear_and_type 走 fill('') 稳定路径(原生 <input> 元素)
+        await clear_and_type(page, title[:30], element=title_input)
         logger.info("[填写标题] 标题已填写: %s", title[:30])
 
     @staticmethod
@@ -533,7 +536,8 @@ class IqiyiPlatform(BasePlatform):
         await asyncio.sleep(0.3)
 
         # 清空后输入(跨平台:Mac 用 Cmd+A,其他用 Ctrl+A)
-        await clear_and_type(page, desc[:450])
+        # 传 element= 让 clear_and_type 走 fill('') 稳定路径(原生 <textarea> 元素)
+        await clear_and_type(page, desc[:450], element=desc_textarea)
         logger.info("[填写简介] Description filled: %s", desc[:50])
 
     @staticmethod

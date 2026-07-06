@@ -109,6 +109,61 @@ for tag in parsed_tags:
 - ❌ 把空格和 `#xxx` 一起粘贴：无法触发联想
 - ❌ 按完空格立刻进行下一步：标签芯片还没渲染
 
+### 模拟键盘输入 `#`（话题前缀）—— CDP 直发
+
+`#` 在 US 键盘布局上是 `Shift + Digit3`,**Playwright 的 keyboard 抽象在 Shift 修饰下会丢字符** —— `keyboard.press("Shift+3")` 与 `keyboard.down("Shift") + down("3") + up("3") + up("Shift")` 实测都会让快手等平台识别成数字 `3` 而不是 `#`,导致话题样式不触发、`#` 后字符无法被识别为话题内容。
+
+**Playwright `keyboard.*` 各 API 实测行为**：
+
+| API | 插入字符 | event.key | shiftKey | React onKeyDown | React onChange |
+|---|---|---|---|---|---|
+| `keyboard.press("Shift+3")` | `#`(理论) / `3`(实测) | `#` / `3` | true | ✓ | ✓ |
+| `keyboard.press("3")` | `3` | `3` | false | ✓ | ✓ |
+| `keyboard.press("#")` | — | — | — | **抛 `Unknown key: "#"`** | — |
+| `keyboard.type("#")` | `#`(走 insertText) | 无 keydown | — | ✗ | ✓ |
+| `keyboard.insert_text("#")` | `#` | 无 keydown | — | ✗ | ✓ |
+
+**唯一可靠方案：CDP `Input.dispatchKeyEvent` 直发**,绕过 Playwright keyboard 抽象,显式告诉 Chromium "这次按键的 text 是 # 且带 Shift 修饰"：
+
+```python
+# 1. 获取 CDP session(同一 page/context 复用)
+cdp = await page.context.new_cdp_session(page)
+
+# 2. 显式发送带 text='#' 的 keyDown + keyUp
+#    modifiers 位掩码: 1=Alt 2=Ctrl 4=Meta 8=Shift
+await cdp.send("Input.dispatchKeyEvent", {
+    "type": "keyDown",
+    "key": "#",
+    "code": "Digit3",
+    "text": "#",
+    "modifiers": 8,                # 8 = Shift
+    "windowsVirtualKeyCode": 51,   # VK_3
+})
+await cdp.send("Input.dispatchKeyEvent", {
+    "type": "keyUp",
+    "key": "#",
+    "code": "Digit3",
+    "modifiers": 8,
+    "windowsVirtualKeyCode": 51,
+})
+
+# 3. 等 500ms 让 React onKeyDown/onChange 完成 setState,激活"# 触发话题"识别状态
+await asyncio.sleep(0.5)
+
+# 4. 再用 press_sequentially 逐字输入标签内容
+await element.press_sequentially(tag, delay=150)
+```
+
+**为什么 CDP 能 work、Playwright keyboard 不能**：
+- Playwright keyboard 抽象在内部 `usKeyboardLayout` 查 Digit3 时,把 `shifted` 字段替换 text 后应输出 `#`,但实测在 CloakBrowser / Chromium 派生环境下 key 字段没替换为 shifted 字符
+- CDP `Input.dispatchKeyEvent` 直接接收开发者传入的 `key`/`text`,由 Chromium 原样派发 DOM 事件,JS 端读到的 `event.key='#'`、`event.shiftKey=true`,与真人按键完全一致
+
+**适用场景**：
+- 快手、小红书、抖音、B 站、视频号等内容平台的"输入 # 后联想话题"功能
+- 任何要求 JS 端读到 `event.key='#'` + `event.shiftKey=true` 的 React onKeyDown 处理器(输入法候选框、@ 弹框、自动补全)
+
+**参考实现**：`backend/impl/kuaishou/platform.py` 的 `_input_tags` 方法(line ~772),已落地完整逻辑(CDP # → 500ms 等待 → press_sequentially 逐字 → 选中 _active_ 高亮项 → 空格兜底)。
+
 
 
 ---

@@ -6,4 +6,9 @@ export const channelsApi = {
   getCollections(accountId) {
     return http.get(`/api/channels/collections?account_id=${accountId}`)
   },
+  // 搜索账号附近的位置(后端 CloakBrowser 打开发布页→点位置卡→输入关键字→解析下拉 DOM)
+  // 与合集不同:位置必须传 keyword,后端用关键字真实搜索附近位置
+  getLocations(accountId, keyword) {
+    return http.get(`/api/channels/locations?account_id=${accountId}&keyword=${encodeURIComponent(keyword)}`)
+  },
 }

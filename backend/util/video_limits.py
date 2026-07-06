@@ -10,7 +10,7 @@ VIDEO_LIMITS: dict[str, dict] = {
     "iqiyi":         {"min_duration": 5,    "max_duration": 3600,             "max_size": 16 * 1024**3, "max_title_length": math.inf},  # 5s~60min,  16G
     "douyin":        {"min_duration": 5,    "max_duration": 3600,             "max_size": 16 * 1024**3, "max_title_length": math.inf},  # 5s~60min,  16G
     "baijiahao":     {"min_duration": 5,    "max_duration": math.inf,         "max_size": 12 * 1024**3, "max_title_length": math.inf},  # 5s~无,   12G
-    "weibo":         {"min_duration": 0,    "max_duration": math.inf,         "max_size": 15 * 1024**3, "max_title_length": math.inf},  # 无时长下限,  15G
+    "weibo":         {"min_duration": 0,    "max_duration": math.inf,         "max_size": 15 * 1024**3, "max_title_length": 30},           # 无时长下限,  15G,标题≤30字
     "kuaishou":      {"min_duration": 5,    "max_duration": 3600,             "max_size": 12 * 1024**3, "max_title_length": math.inf},  # 5s~60min,  12G
     "bilibili":      {"min_duration": 5,    "max_duration": 36000,            "max_size": 16 * 1024**3, "max_title_length": 80, "max_desc_length": 2000},  # 5s~600min,16G,标题≤80字,简介≤2000字(emoji=3)
     "xiaohongshu":   {"min_duration": 5,    "max_duration": 14400,            "max_size": 20 * 1024**3, "max_title_length": 20},          # 5s~240min,20G,标题≤20字
