@@ -8,6 +8,7 @@ Chromium) with automatic Playwright fallback.
 
 import asyncio
 import os
+import time
 from datetime import datetime
 
 from util._logger import bind_account_name, get_channel_logger
@@ -34,6 +35,44 @@ class BaijiahaoPlatform(BasePlatform):
     platform_id = 6
     platform_key = "baijiahao"
     platform_name = "百家号"
+
+    # 支持 cookie 字符串导入账号
+    supports_cookie_import = True
+    # 百度系 cookie 全部由 passport.baidu.com 下发，通配 .baidu.com 后对
+    # baijiahao.baidu.com / passport.baidu.com / www.baidu.com 都生效。
+    platform_cookie_domain = ".baidu.com"
+
+    def _parse_cookie_to_storage_state(
+        self, cookie_str: str
+    ) -> tuple[list[dict], list[dict]]:
+        """把 'k=v; k=v' 解析为 Playwright storage_state 的 (cookies, origins)。
+
+        - 全部 cookie 归属 ``platform_cookie_domain`` (.baidu.com)
+        - expires 给 7 天保守占位，sync_profile 跑完后 storage_state 会被
+          回写为真实的 cookie（含真实 expires + localStorage）
+        - localStorage 留空，由 sync_profile 自然补全
+        """
+        cookies: list[dict] = []
+        expires = time.time() + BasePlatform._IMPORT_COOKIE_EXPIRES_SECONDS
+        for pair in cookie_str.split(";"):
+            pair = pair.strip()
+            if not pair or "=" not in pair:
+                continue
+            name, _, value = pair.partition("=")
+            cookies.append({
+                "name": name.strip(),
+                "value": value.strip(),
+                "domain": self.platform_cookie_domain,
+                "path": "/",
+                "expires": expires,
+                "httpOnly": True,
+                "secure": False,
+                "sameSite": "Lax",
+            })
+        logger.info(
+            f"[baijiahao] cookie 解析: {len(cookies)} 条, domain={self.platform_cookie_domain}"
+        )
+        return cookies, []
 
     # ------------------------------------------------------------------
     # login -- QR code / redirect via CloakBrowser
@@ -128,6 +167,10 @@ class BaijiahaoPlatform(BasePlatform):
 
         Uses ``scrape_baijiahao_profile`` from ``_utils`` to scrape the
         rendered account settings page.
+
+        使用无头模式（``headless=True``）。同步完成后立即回写
+        storage_state，把本轮产生的 cookie 更新 + 百家号 localStorage
+        一并落盘，让后续 check_cookie / publish 可用同一份登录态。
         """
         cookie_path = str(Path(BASE_DIR / "cookiesFile" / cookie_file))
         browser = await self.create_browser(headless=True)
@@ -141,6 +184,19 @@ class BaijiahaoPlatform(BasePlatform):
                     "https://baijiahao.baidu.com/builder/rc/home"
                 )
                 name, avatar = await scrape_baijiahao_profile(page)
+
+                # 同步完成后立即把 storage_state 写回（关键）：
+                # 1) cookie 的真实 expires / httponly 等属性
+                # 2) 百家号域下产生的 localStorage (userinfo / token 等)
+                # 手工导入的 cookie 没有这些数据，不写回后续流程仍会失败。
+                try:
+                    await context.storage_state(path=cookie_path)
+                    logger.info(
+                        f"[baijiahao] sync_profile 已回写 storage_state: {cookie_path}"
+                    )
+                except Exception as e:
+                    logger.info(f"[baijiahao] 回写 storage_state 失败: {e}")
+
                 return name, avatar
             finally:
                 await context.close()

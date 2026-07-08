@@ -666,6 +666,145 @@ def login():
     return response
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Cookie 导入账号
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 导入任务的 task_id → status_queue；与 /login 共用 SSE 协议
+import_active_queues: dict[str, Queue] = {}
+
+
+@app.route('/platforms/import-supported', methods=['GET'])
+def platforms_import_supported():
+    """列出所有支持 cookie 字符串导入的平台。
+
+    返回精简字段，前端用来渲染「导入用户」弹窗的平台选择下拉。
+    """
+    from impl.registry import get_platform
+    out = []
+    for pid in sorted(PLATFORM_MAP.keys()):
+        p = get_platform(pid)
+        if p is None or not getattr(p, "supports_cookie_import", False):
+            continue
+        out.append({
+            "id": pid,
+            "key": p.platform_key,
+            "name": p.platform_name,
+            "letter": (p.platform_name[:1] if p.platform_name else ""),
+        })
+    return jsonify({"code": 200, "msg": "ok", "data": out}), 200
+
+
+@app.route('/importAccount', methods=['POST'])
+def import_account_start():
+    """启动一个 cookie 导入任务。
+
+    Request body (JSON):
+        type:        platform_id (int)
+        cookie_str:  浏览器导出的 'k=v; k=v' 字符串
+        account_id:  可选；已存在账号的 id（re-import 时更新 cookie 文件）
+
+    Response:
+        {"code": 200, "msg": "ok", "data": {"task_id": "..."}}
+
+    前端拿到 task_id 后再 EventSource('/importAccount/stream?task_id=...') 拉进度。
+    """
+    data = request.get_json(silent=True) or {}
+    type_raw = data.get('type')
+    cookie_str = (data.get('cookie_str') or '').strip()
+    account_id_raw = data.get('account_id')
+
+    if type_raw is None or not cookie_str:
+        return jsonify({
+            "code": 400, "msg": "缺少 type 或 cookie_str", "data": None,
+        }), 400
+
+    try:
+        type_int = int(type_raw)
+    except (TypeError, ValueError):
+        return jsonify({
+            "code": 400, "msg": "type 必须是整数", "data": None,
+        }), 400
+
+    platform = get_platform(type_int)
+    if platform is None:
+        return jsonify({
+            "code": 400, "msg": "不支持的平台", "data": None,
+        }), 400
+    if not getattr(platform, "supports_cookie_import", False):
+        return jsonify({
+            "code": 400, "msg": f"{platform.platform_name} 暂不支持 cookie 导入",
+            "data": None,
+        }), 400
+
+    account_id = None
+    if account_id_raw is not None and str(account_id_raw).strip():
+        try:
+            account_id = int(account_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({
+                "code": 400, "msg": "account_id 必须是整数", "data": None,
+            }), 400
+
+    task_id = uuid.uuid4().hex
+    status_queue: Queue = Queue()
+    import_active_queues[task_id] = status_queue
+
+    def _cleanup():
+        import_active_queues.pop(task_id, None)
+
+    def _run_import():
+        try:
+            asyncio.run(platform.import_cookie(
+                cookie_str, status_queue, account_id=account_id,
+            ))
+        except asyncio.CancelledError:
+            status_queue.put(json.dumps({
+                "status": "error", "step": 0, "msg": "任务被取消",
+            }))
+        except Exception as e:
+            # import_cookie 内部已经把 error 推过 queue 了；这里是兜底
+            logger.info(f"[importAccount] 未捕获异常: {e}")
+            try:
+                status_queue.put(json.dumps({
+                    "status": "error", "step": 0, "msg": str(e),
+                }))
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run_import, daemon=True)
+    thread.start()
+
+    return jsonify({
+        "code": 200, "msg": "ok",
+        "data": {"task_id": task_id},
+    }), 200
+
+
+@app.route('/importAccount/stream', methods=['GET'])
+def import_account_stream():
+    """SSE 推送 cookie 导入进度。"""
+    task_id = request.args.get('task_id')
+    if not task_id or task_id not in import_active_queues:
+        return jsonify({
+            "code": 404, "msg": "task 不存在或已结束", "data": None,
+        }), 404
+
+    status_queue = import_active_queues[task_id]
+
+    def _cleanup():
+        import_active_queues.pop(task_id, None)
+
+    response = Response(
+        sse_stream(status_queue), mimetype='text/event-stream',
+    )
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Content-Type'] = 'text/event-stream'
+    response.call_on_close(_cleanup)
+    return response
+
+
 def _validate_publish_video(type_id, file_list):
     """校验视频文件是否符合平台限制。
 

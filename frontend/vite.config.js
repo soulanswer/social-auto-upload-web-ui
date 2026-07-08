@@ -99,6 +99,17 @@ export default defineConfig({
         timeout: 120000,
         proxyTimeout: 120000,
       },
+      // cookie 字符串导入账号（BasePlatform.import_cookie）
+      '/importAccount': {
+        target: 'http://localhost:5409',
+        changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
+      },
+      '/platforms': {
+        target: 'http://localhost:5409',
+        changeOrigin: true,
+      },
       '/api': {
         target: 'http://localhost:5409',
         changeOrigin: true,

@@ -58,5 +58,17 @@ export const accountApi = {
 
   getAccountTags(accountId) {
     return http.get(`/api/accounts/${accountId}/tags`)
-  }
+  },
+
+  // ── cookie 字符串导入账号 ──
+
+  // 列出所有支持 cookie 导入的平台
+  getImportSupportedPlatforms() {
+    return http.get('/platforms/import-supported')
+  },
+
+  // 启动一个 cookie 导入任务，返回 task_id
+  startImportAccount(data) {
+    return http.post('/importAccount', data)
+  },
 }

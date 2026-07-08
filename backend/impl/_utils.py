@@ -330,10 +330,21 @@ async def scrape_baijiahao_profile(page):
         # Navigate to account settings page where avatar and name are rendered
         await page.goto(
             "https://baijiahao.baidu.com/builder/rc/settings/accountSet",
-            timeout=15000,
+            timeout=20000,
         )
-        await page.wait_for_load_state('domcontentloaded', timeout=10000)
-        await asyncio.sleep(2)
+        await page.wait_for_load_state('domcontentloaded', timeout=15000)
+
+        # 等待用户信息节点出现（SPA 异步渲染）
+        # userName 容器比 userImg 先就绪，先等 name
+        try:
+            await page.locator('div[class*="userName"]').first.wait_for(
+                state="visible", timeout=12000,
+            )
+        except Exception as e:
+            # 未在 12s 内出现：可能 cookie 失效跳转到了登录页，记录后继续
+            logger.info(f"[baijiahao] userName 元素等待超时: {e}; 当前 url={page.url}")
+
+        await asyncio.sleep(1)
 
         # Avatar: img with class containing "userImg"
         avatar_el = page.locator('img[class*="userImg"]').first
@@ -343,7 +354,10 @@ async def scrape_baijiahao_profile(page):
         # Username: div with class containing "userName"
         name_el = page.locator('div[class*="userName"]').first
         if await name_el.count():
-            name = (await name_el.text_content() or '').strip()
+            # 优先取 title 兜底 text
+            name = (await name_el.get_attribute('title') or '').strip()
+            if not name:
+                name = (await name_el.text_content() or '').strip()
 
         logger.info(f"[baijiahao] profile scraped - name={name!r} avatar={avatar[:50] if avatar else 'None'}")
     except Exception as e:
@@ -757,21 +771,49 @@ async def scrape_zhihu_profile(page):
                 await page.wait_for_url("**/people/**", timeout=15000)
             except Exception:
                 pass
-        await page.wait_for_load_state("domcontentloaded", timeout=10000)
-        await asyncio.sleep(2)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
 
         # 4. 抓取昵称和头像
+        # 知乎「我的主页」是 SPA，跳转后异步渲染。先等昵称容器出现再读。
         try:
-            name_el = page.locator('span.ProfileHeader-name, h1.ProfileHeader-title').first
+            name_el = page.locator(
+                'span.ProfileHeader-name, h1.ProfileHeader-title, '
+                'h1.UserHeaderName, .ProfileHeader-name'
+            ).first
+            try:
+                await name_el.wait_for(state="visible", timeout=10000)
+            except Exception as e:
+                logger.info(f"[zhihu] 昵称容器等待超时 (url={page.url}): {e}")
             if await name_el.count() > 0:
                 name = (await name_el.text_content() or "").strip()
         except Exception as e:
             logger.info(f"[zhihu] 昵称抓取失败: {e}")
 
+        # 兜底：从 URL / 页面 title 提取昵称
+        if not name:
+            try:
+                title = (await page.title() or "").strip()
+                # title 一般是 "xxx - 知乎" 或 "xxx的主页"
+                if title and "知乎" in title:
+                    cand = title.split("-")[0].split("的")[0].strip()
+                    if cand and cand != "知乎":
+                        name = cand
+                        logger.info(f"[zhihu] 从 title 兜底昵称: {name!r}")
+            except Exception:
+                pass
+
         try:
             avatar_el = page.locator(
-                '.UserAvatar-inner, .ProfileHeader-avatar img.Avatar'
+                '.UserAvatar-inner img, .ProfileHeader-avatar img.Avatar, '
+                '.UserAvatar-inner, img.Avatar'
             ).first
+            try:
+                await avatar_el.wait_for(state="attached", timeout=8000)
+            except Exception:
+                pass
             if await avatar_el.count() > 0:
                 avatar = (await avatar_el.get_attribute("src") or "").strip()
         except Exception as e:
