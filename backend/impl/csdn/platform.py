@@ -49,18 +49,50 @@ class CsdnPlatform(BasePlatform):
     supports_cookie_import = True
     platform_cookie_domain = ".csdn.net"
 
+    # CSDN 专属 cookie 属性映射表（从真实登录保存的 storage_state dump 得到）。
+    # 纯 k=v 字符串不带 domain/secure/httpOnly，一刀切设 .csdn.net 会导致
+    # 登录态丢失：mp.csdn.net 判定未登录。这里按真实多子域结构智能分配。
+    #
+    # 这些 cookie 不在 .csdn.net 主域：
+    _CSDN_COOKIE_DOMAIN_MAP = {
+        "https_waf_cookie": "passport.csdn.net",
+        "waf_captcha_marker": "passport.csdn.net",
+        "bc_bot_session": ".blog.csdn.net",
+        "_bl_uid": "i.csdn.net",
+    }
+    # secure=True 的 cookie（真实文件里只有这两个走 HTTPS-only）：
+    _CSDN_SECURE_COOKIES = {"https_waf_cookie", "bc_bot_session"}
+    # httpOnly=True 的 cookie（真实文件里只有这几个服务端设置的）：
+    _CSDN_HTTPONLY_COOKIES = {
+        "SESSION", "UserInfo", "UserToken",
+        "https_waf_cookie", "waf_captcha_marker",
+    }
+
     def _parse_cookie_to_storage_state(self, cookie_str):
         cookies = []
         expires = time.time() + BasePlatform._IMPORT_COOKIE_EXPIRES_SECONDS
         for pair in cookie_str.split(";"):
             pair = pair.strip()
-            if not pair or "=" not in pair: continue
+            if not pair or "=" not in pair:
+                continue
             name, _, value = pair.partition("=")
+            name = name.strip()
+            domain = self._CSDN_COOKIE_DOMAIN_MAP.get(name, self.platform_cookie_domain)
             cookies.append({
-                "name": name.strip(), "value": value.strip(),
-                "domain": self.platform_cookie_domain, "path": "/",
-                "expires": expires, "httpOnly": True, "secure": False, "sameSite": "Lax",
+                "name": name, "value": value.strip(),
+                "domain": domain, "path": "/",
+                "expires": expires,
+                "httpOnly": name in self._CSDN_HTTPONLY_COOKIES,
+                "secure": name in self._CSDN_SECURE_COOKIES,
+                "sameSite": "Lax",
             })
+
+        # SESSION 在 .csdn.net 和 msg.csdn.net 各存一份（与真实文件一致）
+        session_cookies = [c for c in cookies if c["name"] == "SESSION"]
+        for sc in session_cookies:
+            if sc["domain"] == self.platform_cookie_domain:
+                cookies.append({**sc, "domain": "msg.csdn.net"})
+
         return cookies, []
 
     # ------------------------------------------------------------------
@@ -151,7 +183,7 @@ class CsdnPlatform(BasePlatform):
     async def sync_profile(self, cookie_file: str) -> tuple:
         cookie_path = str(Path(BASE_DIR / "cookiesFile" / cookie_file))
 
-        browser = await self.create_browser(headless=False)
+        browser = await self.create_browser(headless=True)
         try:
             context = await self.create_context(browser, storage_state=cookie_path)
             page = await context.new_page()
