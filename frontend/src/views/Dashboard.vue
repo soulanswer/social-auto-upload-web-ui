@@ -45,10 +45,29 @@
           </div>
         </div>
         <div class="stat-bottom">
-          <div class="stat-detail platform-tags">
-            <span v-for="p in platformList" :key="p.id" :class="['platform-tag', p.cssClass]">
-              {{ p.name }} {{ platformStats[p.cssClass] || 0 }}
-            </span>
+          <!-- 参考 DraftBox.channels 跑马灯: 溢出时横向滚动 -->
+          <div class="platform-channels">
+            <div
+              class="channels-track"
+              :class="{ 'channels-marquee': platformOverflow }"
+              ref="platformTrackRef"
+            >
+              <span
+                v-for="p in sortedPlatforms"
+                :key="p.id"
+                class="channel-tag"
+                :class="{ 'is-active': p.count > 0 }"
+              >
+                <img
+                  v-if="getPlatformLogo(p.key)"
+                  :src="getPlatformLogo(p.key)"
+                  :alt="p.name"
+                  class="channel-icon"
+                />
+                <span class="channel-name">{{ p.name }}</span>
+                <span class="channel-count">{{ p.count }}</span>
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -179,7 +198,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   User, UserFilled, Platform, Document,
@@ -190,7 +209,9 @@ import { accountApi } from '@/api/account'
 import { materialsApi } from '@/api/materials'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
-import { platformList } from '@/config/platforms'
+import {
+  platformList, platformNameToKey, getPlatformByKey,
+} from '@/config/platforms'
 
 const router = useRouter()
 const accountStore = useAccountStore()
@@ -241,6 +262,57 @@ const platformStats = computed(() => {
   const total = platformList.filter(p => counts[p.cssClass] > 0).length
   return { total, ...counts }
 })
+
+// 已接入平台列表 — 参考 DraftBox.channels 风格:
+// 有账号的平台排前面 + count 降序,展示全部 15 个平台
+const sortedPlatforms = computed(() => {
+  return platformList
+    .map(p => ({
+      id: p.id,
+      key: p.key,
+      name: p.name,
+      count: accountStore.accounts.filter(a => a.platform === p.name).length,
+    }))
+    .sort((a, b) => b.count - a.count || a.id - b.id)
+})
+
+// 平台 chip 溢出检测 — 触发跑马灯滚动
+const platformTrackRef = ref(null)
+const platformOverflow = ref(false)
+let platformResizeObserver = null
+
+function detectPlatformOverflow() {
+  const el = platformTrackRef.value
+  if (!el) return
+  // 父容器宽度 = el.parentElement.clientWidth
+  platformOverflow.value = el.scrollWidth > el.parentElement.clientWidth + 1
+}
+
+onMounted(() => {
+  fetchDashboardData()
+  nextTick(() => {
+    detectPlatformOverflow()
+    if (typeof ResizeObserver !== 'undefined' && platformTrackRef.value) {
+      platformResizeObserver = new ResizeObserver(detectPlatformOverflow)
+      platformResizeObserver.observe(platformTrackRef.value)
+      // 父容器 resize 也要监听(窗口缩放/侧栏展开)
+      const parent = platformTrackRef.value.parentElement
+      if (parent) platformResizeObserver.observe(parent)
+    }
+  })
+})
+
+onBeforeUnmount(() => {
+  if (platformResizeObserver) {
+    platformResizeObserver.disconnect()
+    platformResizeObserver = null
+  }
+})
+
+// 复用 platforms.js 的 getPlatformLogo (按 key 查 logo)
+function getPlatformLogo(platformKey) {
+  return getPlatformByKey(platformKey)?.logo || null
+}
 
 // 素材统计数据 - 从 file_type 字段直接统计
 const contentStats = computed(() => {
@@ -300,9 +372,6 @@ const fetchDashboardData = async () => {
   }
 }
 
-onMounted(() => {
-  fetchDashboardData()
-})
 </script>
 
 <script>
@@ -338,12 +407,15 @@ export default {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 16px;
+    min-width: 0;
   }
 
   .stat-card {
     border-radius: $radius-card;
     padding: 20px 24px;
     transition: $transition-base;
+    min-width: 0;        // 关键: grid cell 默认会被内容撑开
+    overflow: hidden;     // 关键: 即使子元素再宽也裁剪掉
 
     &.stat-purple {
       background: $stat-purple-bg;
@@ -486,6 +558,8 @@ export default {
     .stat-bottom {
       border-top: 1px solid rgba(255, 255, 255, 0.06);
       padding-top: 12px;
+      min-width: 0;          // 关键: 防止 flex 子项把 grid cell 撑开
+      overflow: hidden;       // 关键: 强制裁剪, 不让任何子元素跑出 stat-card
     }
 
     .stat-detail {
@@ -507,46 +581,76 @@ export default {
       gap: 6px;
     }
 
-    .platform-tag {
+    // 已接入平台 — 参考 DraftBox.channels 跑马灯布局
+    // 关键: 容器必须 max-width: 100% 约束 + track 用 flex (不是 inline-flex)
+    // 否则 inline-flex track 会按内容宽度撑开, 把 .stat-card 撑爆
+    .platform-channels {
+      overflow: hidden;
+      max-width: 100%;
+      padding: 2px 0;
+      // 进一步防御: 容器本身是 block, 继承 .stat-bottom 的 100% 宽度
+    }
+    .channels-track {
+      display: flex;
+      flex-wrap: nowrap;       // 强制单行, 不要换行
+      gap: 6px;
+      max-width: 100%;
+      min-width: 0;            // 关键: 阻止 flex 子项 min-width:auto 撑开
+      // white-space 不需要: flex-wrap: nowrap 已经保证
+    }
+    .channels-marquee {
+      animation: dashboard-marquee-scroll 12s linear infinite;
+    }
+    .channel-tag {
       display: inline-flex;
       align-items: center;
-      padding: 2px 8px;
-      border-radius: 6px;
+      gap: 5px;
       font-size: 12px;
-      font-weight: 500;
-      color: #ffffff;
+      padding: 3px 9px;
+      border-radius: 999px;
+      flex-shrink: 0;
+      background: rgba(255, 255, 255, 0.06);
+      color: $text-muted;
+      border: 1px solid transparent;
+      transition: all $transition-base;
 
-      &.douyin {
-        background: $platform-douyin-bg;
+      .channel-icon {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+        object-fit: contain;
+      }
+      .channel-name {
+        color: inherit;
+      }
+      .channel-count {
+        font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, monospace;
+        font-weight: 600;
+        font-size: 11px;
+        padding: 0 5px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.08);
+        color: $text-secondary;
+        min-width: 18px;
+        text-align: center;
       }
 
-      &.kuaishou {
-        background: $platform-kuaishou-bg;
-      }
+      // 有账号的平台: 高亮品牌色
+      &.is-active {
+        background: rgba($brand-start, 0.1);
+        color: $text-primary;
+        border-color: rgba($brand-start, 0.25);
 
-      &.channels {
-        background: $platform-channels-bg;
+        .channel-count {
+          background: rgba($brand-start, 0.25);
+          color: #fff;
+        }
       }
+    }
 
-      &.xiaohongshu {
-        background: $platform-xiaohongshu-bg;
-      }
-
-      &.bilibili {
-        background: $platform-bilibili-bg;
-      }
-
-      &.baijiahao {
-        background: $platform-baijiahao-bg;
-      }
-
-      &.tiktok {
-        background: $platform-tiktok-bg;
-      }
-
-      &.youtube {
-        background: $platform-youtube-bg;
-      }
+    @keyframes dashboard-marquee-scroll {
+      0% { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
     }
   }
 

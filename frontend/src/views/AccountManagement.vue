@@ -230,6 +230,13 @@
       @done="onBatchTagDone"
     />
 
+    <!-- 批量检查对话框（复用发布前检查的 4 阶段进度 + 失效自动重登） -->
+    <PrePublishCheckDialog
+      ref="prePublishCheckRef"
+      v-model="prePublishCheckVisible"
+      mode="account-check"
+    />
+
     <!-- 导入用户对话框：粘贴 cookie 字符串 → 后端 4 步进度 -->
     <el-dialog
       v-model="importDialogVisible"
@@ -430,6 +437,7 @@ import { platformList, platformNameToId, platformNameToKey, platformCssMap, getP
 import { getDefaultAvatar, proxyAvatar } from '@/utils/avatar'
 import LoginDialog from '@/components/LoginDialog.vue'
 import TagPopover from '@/components/TagPopover.vue'
+import PrePublishCheckDialog from '@/components/PrePublishCheckDialog.vue'
 import BatchTagDialog from '@/components/BatchTagDialog.vue'
 
 const accountStore = useAccountStore()
@@ -543,23 +551,32 @@ const fetchAccountsQuick = async () => {
   }
 }
 
+// 模板里用 ref 拿到 PrePublishCheckDialog 组件实例
+const prePublishCheckRef = ref(null)
+const prePublishCheckVisible = ref(false)
+
 const fetchAccounts = async () => {
   if (appStore.isAccountRefreshing) return
+  if (!accountStore.accounts.length) {
+    ElMessage.warning('暂无账号可检查')
+    return
+  }
   appStore.setAccountRefreshing(true)
+  // 复用发布前检查的 4 阶段进度弹窗（与发布流程交互一致）:
+  // 1) checking → 进度条 + 卡片实时状态
+  // 2) all-valid → 全部正常，1.2s 后自动关闭
+  // 3) fixing   → 失效账号自动打开 SSE 登录
+  // 4) done     → 全部修复完成，1.2s 后自动关闭
   try {
-    const res = await accountApi.getValidAccounts()
-    if (res.code === 200 && res.data) {
-      accountStore.setAccounts(res.data)
-      ElMessage.success('账号数据获取成功')
-      if (appStore.isFirstTimeAccountManagement) {
-        appStore.setAccountManagementVisited()
-      }
-    } else {
-      ElMessage.error('获取账号数据失败')
+    const allValid = await prePublishCheckRef.value.open(accountStore.accounts)
+    // dialog 内部已逐张更新 accountStore；这里再拉一次最新状态保证 UI 同步
+    await fetchAccountsQuick()
+    if (allValid && appStore.isFirstTimeAccountManagement) {
+      appStore.setAccountManagementVisited()
     }
   } catch (error) {
-    console.error('获取账号数据失败:', error)
-    ElMessage.error('获取账号数据失败')
+    console.error('批量检查失败:', error)
+    ElMessage.error('批量检查失败')
   } finally {
     appStore.setAccountRefreshing(false)
   }

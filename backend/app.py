@@ -1620,4 +1620,6 @@ if __name__ == "__main__":
     logger.info(f"[Startup] Starting Waitress server on port {port}")
     from waitress import serve
     os.environ["SAU_PORT"] = str(port)
-    serve(app, host="0.0.0.0", port=port)
+    # threads=16：默认 4 线程会被「并发 checkCookie + 多个 SSE /login 长连接」
+    # 占满，导致后端假死。加大线程池让两者不再互相挤占。
+    serve(app, host="0.0.0.0", port=port, threads=16)
