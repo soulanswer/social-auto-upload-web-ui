@@ -30,7 +30,7 @@
             class="platform-tag"
             :style="{ background: currentPlatformConfig.bgColor, color: currentPlatformConfig.color }"
           >
-            {{ currentPlatformConfig.name }} · 个性化设置
+            {{ currentHeaderTagText }}
           </span>
         </div>
         <div class="header-right">
@@ -119,10 +119,9 @@
           <div class="section-bar">
             <div class="bar" :style="{ background: currentPlatformConfig.color }"></div>
             <span class="section-label">
-              {{ currentPlatformConfig.name }}
-              {{ selectedAccountId ? '· ' + getAccountName(selectedAccountId) : '· 默认设置' }}
+              {{ currentSettingsTitle }}
             </span>
-            <span class="hint">{{ selectedAccountId ? '仅对该账号生效' : '对该分组所有未自定义的账号生效' }}</span>
+            <span class="hint">{{ currentSettingsHint }}</span>
           </div>
 
           <div v-if="selectedAccountId && hasAccountOverride(selectedAccountId)" style="margin-bottom: 12px;">
@@ -223,7 +222,7 @@
             </template>
 
             <!-- 小红书专属卡片(合集为账号级,选中账号后才显示) -->
-            <template v-if="selectedPlatform === 'xiaohongshu' && selectedAccountId">
+            <template v-if="selectedPlatform === 'xiaohongshu' && isCurrentAccountPersonalized">
               <div class="setting-card" :style="{ borderColor: currentPlatformConfig.color + '26', background: currentPlatformConfig.color + '0a' }">
                 <div class="setting-label" :style="{ color: currentPlatformConfig.color }">加入合集</div>
                 <RemoteSearchSelect
@@ -241,7 +240,7 @@
             </template>
 
             <!-- B 站专属卡片(合集为账号级,选中账号后才显示) -->
-            <template v-if="selectedPlatform === 'bilibili' && selectedAccountId">
+            <template v-if="selectedPlatform === 'bilibili' && isCurrentAccountPersonalized">
               <div class="setting-card" :style="{ borderColor: currentPlatformConfig.color + '26', background: currentPlatformConfig.color + '0a' }">
                 <div class="setting-label" :style="{ color: currentPlatformConfig.color }">选择合集</div>
                 <RemoteSearchSelect
@@ -259,7 +258,7 @@
             </template>
 
             <!-- 视频号专属卡片(合集为账号级,选中账号后才显示) -->
-            <template v-if="selectedPlatform === 'channels' && selectedAccountId">
+            <template v-if="selectedPlatform === 'channels' && isCurrentAccountPersonalized">
               <div class="setting-card" :style="{ borderColor: currentPlatformConfig.color + '26', background: currentPlatformConfig.color + '0a' }">
                 <div class="setting-label" :style="{ color: currentPlatformConfig.color }">选择合集</div>
                 <RemoteSearchSelect
@@ -291,7 +290,7 @@
             </template>
 
             <!-- 微博专属卡片(合集为账号级,选中账号后才显示) -->
-            <template v-if="selectedPlatform === 'weibo' && selectedAccountId">
+            <template v-if="selectedPlatform === 'weibo' && isCurrentAccountPersonalized">
               <div class="setting-card" :style="{ borderColor: currentPlatformConfig.color + '26', background: currentPlatformConfig.color + '0a' }">
                 <div class="setting-label" :style="{ color: currentPlatformConfig.color }">加入合集</div>
                 <RemoteSearchSelect
@@ -605,8 +604,10 @@ import { useAutoSave } from '@/composables/useAutoSave'
 import { useBatchSetApply } from '@/composables/useBatchSetApply'
 import { frameApi } from '@/api/frame'
 import { draftApi } from '@/api/draft'
+import { settingsApi } from '@/api/v2'
 import { useRoute } from 'vue-router'
 import { HASHTAG_RE as DESC_HASHTAG_RE, countDescriptionHashtags, useAutoExtractHashtags } from '@/utils/hashtag'
+import { splitTagInput } from '@/utils/tag-input'
 
 // ========== Stores & Config ==========
 const accountStore = useAccountStore()
@@ -649,6 +650,78 @@ const currentPlatformConfig = computed(() =>
   selectedPlatform.value ? getPlatformByKey(selectedPlatform.value) : null
 )
 
+const MEDIA_OVERRIDE_KEYS = ['coverPortrait', 'coverLandscape', 'videoPortrait', 'videoLandscape']
+
+function createMediaOverrideShell() {
+  return {
+    coverPortrait: null,
+    coverLandscape: null,
+    videoPortrait: null,
+    videoLandscape: null,
+  }
+}
+
+// override 只保存差异值，因此非媒体字段只要存在 key 就说明用户显式覆写过
+function hasOverrideContent(override) {
+  if (!override) return false
+  return Object.keys(override).some((key) => {
+    if (MEDIA_OVERRIDE_KEYS.includes(key)) {
+      return override[key] !== null && override[key] !== undefined
+    }
+    return Object.prototype.hasOwnProperty.call(override, key)
+  })
+}
+
+function pickMediaOverrideFields(source = {}) {
+  const result = {}
+  for (const key of MEDIA_OVERRIDE_KEYS) {
+    if (source[key] !== null && source[key] !== undefined) {
+      result[key] = source[key]
+    }
+  }
+  return result
+}
+
+function cloneSettingValue(value) {
+  if (Array.isArray(value)) return [...value]
+  if (value && typeof value === 'object') return { ...value }
+  return value
+}
+
+function isSameSettingValue(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return JSON.stringify(left ?? []) === JSON.stringify(right ?? [])
+  }
+  if ((left && typeof left === 'object') || (right && typeof right === 'object')) {
+    return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
+  }
+  return left === right
+}
+
+function isPlatformOverrideEnabled(platformKey = selectedPlatform.value) {
+  return !!(platformKey && platformChecked[platformKey])
+}
+
+function isAccountOverrideEnabled(accountId = selectedAccountId.value) {
+  return !!(accountId && accountChecked[accountId])
+}
+
+const isCurrentAccountPersonalized = computed(() => isAccountOverrideEnabled())
+
+const currentHeaderTagText = computed(() => {
+  if (!currentPlatformConfig.value) return ''
+  if (isCurrentAccountPersonalized.value) {
+    return `${currentPlatformConfig.value.name} · 账号个性化`
+  }
+  if (selectedAccountId.value) {
+    return `${currentPlatformConfig.value.name} · 账号查看`
+  }
+  if (isPlatformOverrideEnabled()) {
+    return `${currentPlatformConfig.value.name} · 渠道个性化`
+  }
+  return `${currentPlatformConfig.value.name} · 默认设置`
+})
+
 // ========== Public Config ==========
 const commonConfig = reactive({
   videoLandscape: null,
@@ -668,73 +741,75 @@ const accountChecked = reactive({})            // { [accountId]: boolean }
 // 勾选账号 → accountOverrides[id]；勾选平台 → platformOverrides[key]；默认 → commonConfig
 const currentEditTarget = computed(() => {
   const aid = selectedAccountId.value
-  if (aid && accountChecked[aid] && accountOverrides[aid]) return accountOverrides[aid]
+  if (isAccountOverrideEnabled(aid) && accountOverrides[aid]) return accountOverrides[aid]
   const pk = selectedPlatform.value
-  if (pk && platformChecked[pk] && platformOverrides[pk]) return platformOverrides[pk]
+  if (isPlatformOverrideEnabled(pk) && platformOverrides[pk]) return platformOverrides[pk]
   return commonConfig
 })
 
 function hasPlatformOverrideContent(platformKey) {
-  const ov = platformOverrides[platformKey]
-  if (!ov) return false
-  return !!(
-    ov.coverPortrait || ov.coverLandscape ||
-    ov.videoPortrait  || ov.videoLandscape
-  )
+  return hasOverrideContent(platformOverrides[platformKey])
 }
 
 function hasAccountOverrideContent(accountId) {
-  const ov = accountOverrides[accountId]
-  if (!ov) return false
-  return !!(
-    ov.coverPortrait || ov.coverLandscape ||
-    ov.videoPortrait  || ov.videoLandscape
-  )
+  return hasOverrideContent(accountOverrides[accountId])
 }
 
 // ========== Override Section: Interaction ==========
 
 function onPlatformCheckChange(checked) {
-  if (!checked && hasPlatformOverrideContent(selectedPlatform.value)) {
-    ElMessageBox.confirm(
-      '取消个性化配置后，本渠道的覆写将丢失，恢复使用公共默认，是否继续？',
-      '确认取消', { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' }
-    ).then(() => {
-      delete platformOverrides[selectedPlatform.value]
-    }).catch(() => {
-      platformChecked[selectedPlatform.value] = true
-    })
-  } else if (checked) {
-    platformOverrides[selectedPlatform.value] = {
-      coverPortrait: null, coverLandscape: null,
-      videoPortrait: null, videoLandscape: null,
+  const platformKey = selectedPlatform.value
+  if (!platformKey) return
+  if (!checked) {
+    if (hasPlatformOverrideContent(platformKey)) {
+      ElMessageBox.confirm(
+        '取消个性化配置后，本渠道的覆写将丢失，恢复使用公共默认，是否继续？',
+        '确认取消', { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' }
+      ).then(() => {
+        delete platformOverrides[platformKey]
+      }).catch(() => {
+        platformChecked[platformKey] = true
+      })
+    } else {
+      delete platformOverrides[platformKey]
     }
+    return
+  }
+  platformOverrides[platformKey] = {
+    ...createMediaOverrideShell(),
+    ...(platformOverrides[platformKey] || {}),
   }
 }
 
 function onAccountCheckChange(checked) {
-  if (!checked && hasAccountOverrideContent(selectedAccountId.value)) {
-    ElMessageBox.confirm(
-      '取消个性化配置后，本账号的覆写将丢失，恢复使用渠道默认，是否继续？',
-      '确认取消', { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' }
-    ).then(() => {
-      delete accountOverrides[selectedAccountId.value]
-    }).catch(() => {
-      accountChecked[selectedAccountId.value] = true
-    })
-  } else if (checked) {
-    accountOverrides[selectedAccountId.value] = {
-      coverPortrait: null, coverLandscape: null,
-      videoPortrait: null, videoLandscape: null,
+  const accountId = selectedAccountId.value
+  if (!accountId) return
+  if (!checked) {
+    if (hasAccountOverrideContent(accountId)) {
+      ElMessageBox.confirm(
+        '取消个性化配置后，本账号的覆写将丢失，恢复使用渠道默认，是否继续？',
+        '确认取消', { confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning' }
+      ).then(() => {
+        delete accountOverrides[accountId]
+      }).catch(() => {
+        accountChecked[accountId] = true
+      })
+    } else {
+      delete accountOverrides[accountId]
     }
+    return
+  }
+  accountOverrides[accountId] = {
+    ...createMediaOverrideShell(),
+    ...(accountOverrides[accountId] || {}),
   }
 }
 
 // ========== 4 级优先级合并（spec §3.3） ==========
 // accountOv > platformOv > platformDefault > common
 function resolveAccountConfig(platformKey, accountId) {
-  const accountOv = accountOverrides[accountId] || null
-  const platformOv = platformOverrides[platformKey] || null
+  const accountOv = isAccountOverrideEnabled(accountId) ? (accountOverrides[accountId] || null) : null
+  const platformOv = isPlatformOverrideEnabled(platformKey) ? (platformOverrides[platformKey] || null) : null
   const platformDefault = platformConfigs[platformKey] || null
   return mergeConfig(commonConfig, platformDefault, platformOv, accountOv)
 }
@@ -896,9 +971,7 @@ function getAccountSettings(accountId, platformKey) {
 }
 
 function hasAccountOverride(accountId) {
-  const override = accountOverrides[accountId]
-  if (!override) return false
-  return Object.values(override).some(v => v !== undefined && v !== '' && v !== false)
+  return isAccountOverrideEnabled(accountId) && hasOverrideContent(accountOverrides[accountId])
 }
 
 const form = reactive({})
@@ -907,21 +980,20 @@ function getMergedSettings() {
   const platformKey = selectedPlatform.value
   if (!platformKey) return {}
   const platform = platformConfigs[platformKey] || {}
-  if (selectedAccountId.value) {
+  const merged = { ...platform }
+  if (isAccountOverrideEnabled()) {
     const override = accountOverrides[selectedAccountId.value]
     if (override && Object.keys(override).length > 0) {
-      return {
-        ...platform,
-        ...Object.fromEntries(
-          Object.entries(override).filter(([_, v]) => v !== undefined && v !== '' && v !== false)
-        ),
+      for (const [key, value] of Object.entries(override)) {
+        if (MEDIA_OVERRIDE_KEYS.includes(key)) continue
+        merged[key] = cloneSettingValue(value)
       }
     }
   }
-  return { ...platform }
+  return merged
 }
 
-watch([selectedPlatform, selectedAccountId], () => {
+function syncFormFromCurrentSettings() {
   const merged = getMergedSettings()
   for (const key of Object.keys(merged)) {
     form[key] = merged[key]
@@ -944,7 +1016,18 @@ watch([selectedPlatform, selectedAccountId], () => {
       }
     }
   }
-}, { immediate: true })
+}
+
+watch(
+  [
+    selectedPlatform,
+    selectedAccountId,
+    () => platformChecked[selectedPlatform.value],
+    () => accountChecked[selectedAccountId.value],
+  ],
+  syncFormFromCurrentSettings,
+  { immediate: true },
+)
 
 // 小红书:内容来源声明选「来源转载」时,转载内容不能声明原创 →
 // 强制把原创声明还原为「非原创」(false)。切换回自主拍摄/其他声明时由用户重新勾选。
@@ -963,25 +1046,27 @@ watch(form, (newVal) => {
   }
   const platform = platformConfigs[platformKey]
 
-  if (selectedAccountId.value) {
+  if (selectedAccountId.value && isAccountOverrideEnabled(selectedAccountId.value)) {
     const diff = {}
     for (const key of Object.keys(newVal)) {
-      if (newVal[key] !== platform[key]) {
-        diff[key] = newVal[key]
+      if (!isSameSettingValue(newVal[key], platform[key])) {
+        diff[key] = cloneSettingValue(newVal[key])
       }
     }
-    // 用 merge 而不是 replace：保留已上传的视频/封面/图片等媒体字段
-    // （这些字段不在 form 里，diff 不会包含它们）
-    const existing = accountOverrides[selectedAccountId.value]
-    if (Object.keys(diff).length > 0) {
-      accountOverrides[selectedAccountId.value] = existing
-        ? { ...existing, ...diff }
-        : { ...diff }
+    // 账号级覆写只保留媒体字段和真正与渠道默认不同的文本字段
+    const existing = accountOverrides[selectedAccountId.value] || {}
+    const nextOverride = {
+      ...pickMediaOverrideFields(existing),
+      ...diff,
     }
-    // diff 为空时不要 delete！媒体字段可能还在
+    if (hasOverrideContent(nextOverride)) {
+      accountOverrides[selectedAccountId.value] = nextOverride
+    } else {
+      delete accountOverrides[selectedAccountId.value]
+    }
   } else {
     for (const key of Object.keys(newVal)) {
-      platform[key] = newVal[key]
+      platform[key] = cloneSettingValue(newVal[key])
     }
   }
 }, { deep: true })
@@ -991,8 +1076,27 @@ function getAccountName(accountId) {
   return account ? account.name : '未知'
 }
 
+const currentSettingsTitle = computed(() => {
+  if (!currentPlatformConfig.value) return ''
+  if (isCurrentAccountPersonalized.value) {
+    return `${currentPlatformConfig.value.name} · ${getAccountName(selectedAccountId.value)}`
+  }
+  return `${currentPlatformConfig.value.name} · 默认设置`
+})
+
+const currentSettingsHint = computed(() => {
+  if (isCurrentAccountPersonalized.value) {
+    return '仅对该账号生效'
+  }
+  if (selectedAccountId.value) {
+    return `当前正在查看 ${getAccountName(selectedAccountId.value)}，未开启账号个性化，修改将写入渠道默认`
+  }
+  return '对该分组所有未自定义的账号生效'
+})
+
 function resetAccountOverride(accountId) {
   delete accountOverrides[accountId]
+  syncFormFromCurrentSettings()
   ElMessage.success('已恢复为渠道默认设置')
 }
 
@@ -1004,29 +1108,39 @@ const { hasChanges, startAutoSaveTimer } = useAutoSave(() => saveDraft())
 const tagInput = ref('')
 
 function addTag() {
-  const tag = tagInput.value.trim()
-  if (!tag) return
+  const inputTags = splitTagInput(tagInput.value)
+  if (inputTags.length === 0) return
   if (!form.tags) form.tags = []
-  if (form.tags.includes(tag)) {
+
+  let hasInserted = false
+  let hasDuplicate = false
+  for (const tag of inputTags) {
+    if (form.tags.includes(tag)) {
+      hasDuplicate = true
+      continue
+    }
+    if (selectedPlatform.value === 'douyin') {
+      const ac = form.activityId?.length || 0
+      const tc = form.tags?.length || 0
+      if (ac + tc >= 5) {
+        ElMessage.warning('官方活动 + 标签最多 5 个')
+        break
+      }
+    }
+    if (selectedPlatform.value === 'kuaishou') {
+      const tc = form.tags?.length || 0
+      if (tc >= 4) {
+        ElMessage.warning('快手标签最多 4 个')
+        break
+      }
+    }
+    form.tags.push(tag)
+    hasInserted = true
+  }
+
+  if (!hasInserted && hasDuplicate) {
     ElMessage.warning('标签已存在')
-    return
   }
-  if (selectedPlatform.value === 'douyin') {
-    const ac = form.activityId?.length || 0
-    const tc = form.tags?.length || 0
-    if (ac + tc >= 5) {
-      ElMessage.warning('官方活动 + 标签最多 5 个')
-      return
-    }
-  }
-  if (selectedPlatform.value === 'kuaishou') {
-    const tc = form.tags?.length || 0
-    if (tc >= 4) {
-      ElMessage.warning('快手标签最多 4 个')
-      return
-    }
-  }
-  form.tags.push(tag)
   tagInput.value = ''
 }
 
@@ -1304,19 +1418,44 @@ const batchSetPlatforms = computed(() => {
     return { key: p.key, name: p.name, logo: p.logo, count: selectedCount }
   })
 })
+
+function normalizeVideoPublishDefaults(rawDefaults) {
+  if (!rawDefaults) return {}
+  if (typeof rawDefaults === 'string') {
+    try {
+      return JSON.parse(rawDefaults)
+    } catch (e) {
+      console.warn('解析视频发布模板默认值失败:', e)
+      return {}
+    }
+  }
+  return rawDefaults
+}
+
+function applyVideoPublishDefaults(rawDefaults) {
+  const defaults = normalizeVideoPublishDefaults(rawDefaults)
+  for (const [platformKey, config] of Object.entries(defaults)) {
+    if (!platformConfigs[platformKey] || !config || typeof config !== 'object') continue
+    Object.assign(platformConfigs[platformKey], config)
+  }
+  syncFormFromCurrentSettings()
+}
+
+async function loadVideoPublishDefaults() {
+  try {
+    const res = await settingsApi.getSettings()
+    if (res.code === 200 && res.data?.videoPublishDefaults) {
+      applyVideoPublishDefaults(res.data.videoPublishDefaults)
+    }
+  } catch (e) {
+    console.error('加载视频发布模板默认值失败:', e)
+  }
+}
 function onBatchSetApply(checkedKeys, payload) {
   applyBatchSet(checkedKeys, payload)
   // 如果当前查看的渠道在批量设范围内,强制刷新 form (watch [selectedPlatform,...] 不会自动触发)
   if (selectedPlatform.value && checkedKeys.includes(selectedPlatform.value)) {
-    const merged = getMergedSettings()
-    for (const key of Object.keys(merged)) {
-      form[key] = merged[key]
-    }
-    for (const key of Object.keys(form)) {
-      if (!(key in merged)) {
-        delete form[key]
-      }
-    }
+    syncFormFromCurrentSettings()
   }
   ElMessage.success(`已批量设置到 ${checkedKeys.length} 个渠道`)
 }
@@ -1690,6 +1829,7 @@ async function restoreDraft(draftId) {
       triggerFrameExtraction(commonConfig.videoPortrait, 'portrait')
     }
 
+    syncFormFromCurrentSettings()
     ElMessage.success('草稿已恢复')
   } catch (e) {
     ElMessage.error('草稿恢复失败')
@@ -1707,6 +1847,9 @@ onMounted(async () => {
 
   // 加载标签列表(确保「选择账号」弹窗内的标签筛选可用)
   accountStore.loadTags()
+
+  // 先加载渠道默认模板值，再恢复草稿；草稿和历史填写会在此基础上覆盖
+  await loadVideoPublishDefaults()
 
   // 清理 publishAccountIds 中属于黑名单平台的账号（本地清理，不写后端）
   // Set 是发布页内存状态，重建一个新的 Set 来剔除被拉黑平台的账号
@@ -2312,6 +2455,7 @@ function handleOneClickFill(record) {
     }
     filled++
   }
+  syncFormFromCurrentSettings()
   if (filled > 0) {
     ElMessage.success(`已从历史填充 ${filled} 个平台配置${selectedAccounts > 0 ? `，已选中 ${selectedAccounts} 个账号` : ''}`)
   } else {

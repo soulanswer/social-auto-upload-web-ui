@@ -29,9 +29,10 @@
       </el-form-item>
       <el-form-item label="标签">
         <div class="tag-input-wrap">
+          <div class="tag-input-hint">输入标签内容，按回车确认，支持逗号分割</div>
           <el-input
             v-model="tagInput"
-            placeholder="输入标签内容，按回车添加"
+            placeholder="输入标签内容，按回车添加，支持逗号分割"
             @keyup.enter="addTag"
             clearable
           />
@@ -107,6 +108,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { splitTagInput } from '@/utils/tag-input'
 
 const MAX_TAGS = 10
 
@@ -152,17 +154,23 @@ function toggleKey(p) {
 }
 
 function addTag() {
-  const v = (tagInput.value || '').trim()
-  if (!v) return
-  if (formTags.value.length >= MAX_TAGS) {
-    ElMessage.warning(`最多 ${MAX_TAGS} 个标签`)
-    return
+  const inputTags = splitTagInput(tagInput.value)
+  if (inputTags.length === 0) return
+
+  let hasInserted = false
+  for (const tag of inputTags) {
+    if (formTags.value.length >= MAX_TAGS) {
+      ElMessage.warning(`最多 ${MAX_TAGS} 个标签`)
+      break
+    }
+    if (formTags.value.includes(tag)) continue
+    formTags.value = [...formTags.value, tag]
+    hasInserted = true
   }
-  if (formTags.value.includes(v)) {
-    tagInput.value = ''
-    return
+
+  if (!hasInserted) {
+    ElMessage.warning('标签已存在')
   }
-  formTags.value = [...formTags.value, v]
   tagInput.value = ''
 }
 
@@ -191,6 +199,17 @@ function handleApply(mode = 'full') {
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 6px;
   width: 100%;
+}
+
+.tag-input-wrap {
+  width: 100%;
+}
+
+.tag-input-hint {
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: $text-secondary;
 }
 
 .channel-card {

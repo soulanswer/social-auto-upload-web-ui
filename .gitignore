@@ -5,6 +5,8 @@ dist/
 build/
 venv/
 .venv/
+backend-mcp/npm-cache
+frontend/npm-cache
 node_modules/
 .vscode/
 .idea/
