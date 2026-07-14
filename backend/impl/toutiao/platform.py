@@ -16,6 +16,7 @@ from pathlib import Path
 from queue import Queue
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 
 from conf import BASE_DIR
 
@@ -422,6 +423,14 @@ class ToutiaoPlatform(BasePlatform):
                         success_text = page.locator('span.percent:has-text("上传成功")')
                         if await success_text.count():
                             upload_complete = True
+                            log_event(
+                                logger,
+                                "UPLOAD_SUMMARY",
+                                elapsed_s=round(asyncio.get_event_loop().time() - start_time, 1),
+                                ready_reason="percent_upload_success",
+                                current_url=page.url,
+                                file_path=file_path,
+                            )
                             logger.info("[上传视频] 视频上传成功!")
                             break
                         # 打印上传进度
@@ -436,6 +445,14 @@ class ToutiaoPlatform(BasePlatform):
                     await asyncio.sleep(2)
 
                 if not upload_complete:
+                    log_event(
+                        logger,
+                        "UPLOAD_SUMMARY",
+                        elapsed_s=max_wait,
+                        ready_reason="timeout",
+                        current_url=page.url,
+                        file_path=file_path,
+                    )
                     logger.error("[上传视频] 视频上传超时! 已等待 %d 秒", max_wait)
                     return
 
@@ -571,14 +588,23 @@ class ToutiaoPlatform(BasePlatform):
                 publish_btn = page.locator('button.action-footer-btn.submit')
                 if not await publish_btn.count():
                     publish_btn = page.get_by_role("button", name="发布", exact=True)
+                log_event(
+                    logger,
+                    "PUBLISH_GATE",
+                    stage="before_click",
+                    button_count=await publish_btn.count(),
+                    current_url=page.url,
+                )
                 await publish_btn.click()
 
                 # Wait for redirect (publish success)
                 await asyncio.sleep(3)
                 current_url = page.url
                 if "upload-video" not in current_url:
+                    log_event(logger, "PUBLISH_RESULT", result="url_success", current_url=current_url)
                     logger.info("[发布] 视频发布成功! 页面跳转到: %s", current_url)
                 else:
+                    log_event(logger, "PUBLISH_RESULT", result="uncertain_after_3s", current_url=current_url)
                     logger.info("[发布] 发布按钮已点击，等待确认...")
 
                 # Save updated cookie state
