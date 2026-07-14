@@ -36,6 +36,7 @@ from queue import Queue
 from conf import BASE_DIR
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import collect_visible_keyword_texts, log_event
 
 from .._browser import create_browser_sync, create_context_sync
 from .._utils import (
@@ -60,6 +61,87 @@ _ALIPAY_PUBLISH_URL = (
 _ALIPAY_SHORT_CONTENT_URL = (
     "https://c.alipay.com/page/content-creation/publish/short-content"
 )
+
+
+async def _read_locator_attr(locator, attr: str):
+    try:
+        if await locator.count() == 0:
+            return None
+        return await locator.first.get_attribute(attr)
+    except Exception:
+        return None
+
+
+async def _read_locator_value(locator):
+    try:
+        if await locator.count() == 0:
+            return None
+        return await locator.first.input_value()
+    except Exception:
+        return None
+
+
+async def _alipay_publish_gate_snapshot(page, publish_btn=None):
+    if publish_btn is None:
+        publish_btn = page.get_by_role("button", name="确认发布", exact=True).first
+
+    title_input = page.locator("input[placeholder*='好的标题']").first
+    desc_input = page.locator("textarea.mentions-textarea__input").first
+    schedule_input = page.locator(
+        "input[id$='_scheduleTime'], input[placeholder='请选择日期']"
+    ).first
+    author_checked = page.locator("input[name='tagList']:checked").first
+
+    snapshot = {
+        "url": getattr(page, "url", ""),
+        "button_visible": False,
+        "button_disabled_attr": None,
+        "button_aria_disabled": None,
+        "button_class": None,
+        "button_text": None,
+        "title_len": 0,
+        "desc_len": 0,
+        "schedule_value": None,
+        "author_checked_value": None,
+        "visible_errors": [],
+    }
+
+    try:
+        snapshot["button_visible"] = await publish_btn.is_visible()
+    except Exception:
+        pass
+    snapshot["button_disabled_attr"] = await _read_locator_attr(publish_btn, "disabled")
+    snapshot["button_aria_disabled"] = await _read_locator_attr(publish_btn, "aria-disabled")
+    snapshot["button_class"] = await _read_locator_attr(publish_btn, "class")
+    try:
+        if await publish_btn.count() > 0:
+            snapshot["button_text"] = await publish_btn.first.inner_text()
+    except Exception:
+        pass
+
+    title_value = await _read_locator_value(title_input) or ""
+    desc_value = await _read_locator_value(desc_input) or ""
+    snapshot["title_len"] = len(title_value)
+    snapshot["desc_len"] = len(desc_value)
+    snapshot["schedule_value"] = await _read_locator_value(schedule_input)
+    snapshot["author_checked_value"] = await _read_locator_attr(author_checked, "value")
+    snapshot["visible_errors"] = await collect_visible_keyword_texts(
+        page,
+        [
+            "请",
+            "必填",
+            "作者声明",
+            "封面",
+            "定时",
+            "失败",
+            "未完成",
+            "处理中",
+            "上传中",
+            "选择",
+        ],
+        limit=8,
+    )
+    return snapshot
 
 
 # ======================================================================
@@ -818,6 +900,7 @@ class AlipayPlatform(BasePlatform):
         compilation: str = "",
         enable_timer=None,
         schedule_time_str: str = "",
+        debug_ctx: dict | None = None,
     ):
         """单个视频上传到单个账号的完整流程。"""
         # 打印完整上送参数,便于排查(与其他渠道日志风格一致)
@@ -847,6 +930,13 @@ class AlipayPlatform(BasePlatform):
             enable_timer,
             schedule_time_str,
         )
+        if debug_ctx is None:
+            debug_ctx = {
+                "upload_summary": {},
+                "author_summary": {},
+                "schedule_summary": {},
+            }
+
         browser = await self.create_browser(headless=False)
         try:
             context = await self.create_context(
@@ -868,7 +958,7 @@ class AlipayPlatform(BasePlatform):
                 await self._upload_video_file(page, file_path)
 
                 # 2. 等待上传完成 + 表单渲染
-                await self._wait_for_upload_form(page)
+                await self._wait_for_upload_form(page, debug_ctx=debug_ctx)
 
                 # 3. 填标题
                 await self._set_title(page, title)
@@ -903,17 +993,28 @@ class AlipayPlatform(BasePlatform):
                     await self._set_compilation(page, compilation)
 
                 # 7. 作者声明(必填)
-                await self._set_author_statement(page, author_statement)
+                await self._set_author_statement(
+                    page,
+                    author_statement,
+                    debug_ctx=debug_ctx,
+                )
 
                 # 8. 定时发布(可选)
                 if enable_timer and schedule_time_str:
-                    await self._set_schedule_time(page, schedule_time_str)
+                    await self._set_schedule_time(
+                        page,
+                        schedule_time_str,
+                        debug_ctx=debug_ctx,
+                    )
 
                 # 9. 点击"确认发布"
-                await self._click_publish(page)
+                await self._click_publish(page, debug_ctx=debug_ctx)
 
                 # 10. 等待发布成功
-                await self._wait_for_publish_success(page)
+                await self._wait_for_publish_success(
+                    page,
+                    debug_ctx=debug_ctx,
+                )
 
                 # 11. 保存 cookie
                 await context.storage_state(path=account_file)
@@ -1051,7 +1152,7 @@ class AlipayPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _wait_for_upload_form(page, timeout_s: int = 14400):
+    async def _wait_for_upload_form(page, timeout_s: int = 14400, debug_ctx: dict | None = None):
         """等待表单稳定可交互。
 
         判据(AND):
@@ -1064,9 +1165,22 @@ class AlipayPlatform(BasePlatform):
             "input[placeholder*='好的标题']"
         ).first
         upload_prompt = page.get_by_text("将视频文件拖拽到此处").first
-        deadline = asyncio.get_event_loop().time() + timeout_s
+        preview_img = page.locator(
+            'div[class*="StyledRel-content-pc-components"] img[alt], '
+            'div[class*="w-[56px]"][class*="h-[56px]"] img[alt]'
+        ).first
+        progress_nodes = page.locator(
+            'div[class*="StyledText-content-pc-components"], '
+            'span[class*="StyledText-content-pc-components"]'
+        )
+        start_ts = asyncio.get_event_loop().time()
+        deadline = start_ts + timeout_s
         stable_ready_rounds = 0
-        prompt_still_visible_logged = False
+        wait_state_logged = False
+        preview_img_visible = False
+        progress_visible = False
+        progress_values = []
+        last_progress_text = ""
 
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -1080,32 +1194,91 @@ class AlipayPlatform(BasePlatform):
             except Exception:
                 pass
 
-            title_visible = False
-            prompt_visible = False
             try:
-                title_visible = await title_input.is_visible()
+                preview_img_visible = await preview_img.is_visible()
             except Exception:
-                pass
+                preview_img_visible = False
 
             try:
-                if await upload_prompt.count() > 0:
-                    prompt_visible = await upload_prompt.is_visible()
+                progress_values = await page.evaluate(
+                    """() => {
+                        const nodes = Array.from(document.querySelectorAll(
+                            'div[class*="StyledText-content-pc-components"], span[class*="StyledText-content-pc-components"]'
+                        ));
+                        const isVisible = (el) => {
+                            const style = window.getComputedStyle(el);
+                            if (!style || style.display === 'none' || style.visibility === 'hidden') {
+                                return false;
+                            }
+                            const rect = el.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        };
+                        const values = [];
+                        for (const node of nodes) {
+                            if (!isVisible(node)) continue;
+                            const text = (node.textContent || '').replace(/\\s+/g, ' ').trim();
+                            if (/^\\d+%$/.test(text) && !values.includes(text)) {
+                                values.push(text);
+                            }
+                        }
+                        return values;
+                    }"""
+                )
+                progress_visible = len(progress_values) > 0
             except Exception:
-                prompt_visible = False
+                progress_values = []
+                progress_visible = False
 
-            if title_visible and not prompt_visible:
+            if progress_values:
+                progress_text = max(progress_values, key=lambda v: int(v[:-1]))
+                if progress_text != last_progress_text:
+                    last_progress_text = progress_text
+                    logger.info("[上传视频] 视频上传中 %s, 等待完成...", progress_text)
+                    log_event(
+                        logger,
+                        "UPLOAD_PROGRESS",
+                        progress=progress_text,
+                        progress_values=progress_values,
+                        preview_img_visible=preview_img_visible,
+                        current_url=getattr(page, "url", ""),
+                    )
+
+            if preview_img_visible and not progress_visible:
                 stable_ready_rounds += 1
                 if stable_ready_rounds >= 2:
+                    elapsed_s = round(asyncio.get_event_loop().time() - start_ts, 1)
+                    summary = {
+                        "elapsed_s": elapsed_s,
+                        "ready_reason": "preview_visible_no_progress",
+                        "stable_ready_rounds": stable_ready_rounds,
+                        "preview_img_visible": preview_img_visible,
+                        "progress_visible": progress_visible,
+                        "progress_values": progress_values,
+                        "last_progress_text": last_progress_text,
+                        "current_url": getattr(page, "url", ""),
+                    }
+                    if isinstance(debug_ctx, dict):
+                        debug_ctx["upload_summary"] = summary
+                    log_event(logger, "UPLOAD_SUMMARY", **summary)
                     logger.info(
-                        "[上传视频] 标题输入框已可见,且上传入口已隐藏,表单可交互"
+                        "[上传视频] 进度条已消失且预览图已出现，判定上传完成"
                     )
                     return
             else:
-                if title_visible and prompt_visible and not prompt_still_visible_logged:
-                    logger.info(
-                        "[上传视频] 标题输入框已出现,但上传入口仍可见,继续等待状态稳定"
+                if not wait_state_logged:
+                    log_event(
+                        logger,
+                        "UPLOAD_WAIT_STATE",
+                        preview_img_visible=preview_img_visible,
+                        progress_visible=progress_visible,
+                        progress_values=progress_values,
+                        last_progress_text=last_progress_text,
+                        current_url=getattr(page, "url", ""),
                     )
-                    prompt_still_visible_logged = True
+                    logger.info(
+                        "[上传视频] 上传仍未稳定完成，继续等待"
+                    )
+                    wait_state_logged = True
                 stable_ready_rounds = 0
 
             # 进度旁证(每 60s 一次)
@@ -1113,7 +1286,10 @@ class AlipayPlatform(BasePlatform):
                 remaining = int(deadline - asyncio.get_event_loop().time())
                 if remaining % 60 < 5:
                     logger.info(
-                        "[上传视频] 等待上传完成... (剩余 %ds)", remaining,
+                        "[上传视频] 等待上传完成... (剩余 %ds, progress=%s, preview=%s)",
+                        remaining,
+                        progress_values[:3],
+                        preview_img_visible,
                     )
             except Exception:
                 pass
@@ -1124,6 +1300,19 @@ class AlipayPlatform(BasePlatform):
             url = page.url
         except Exception:
             url = "(unknown)"
+        timeout_summary = {
+            "elapsed_s": round(asyncio.get_event_loop().time() - start_ts, 1),
+            "ready_reason": "timeout",
+            "stable_ready_rounds": stable_ready_rounds,
+            "preview_img_visible": preview_img_visible,
+            "progress_visible": progress_visible,
+            "progress_values": progress_values,
+            "last_progress_text": last_progress_text,
+            "current_url": url,
+        }
+        if isinstance(debug_ctx, dict):
+            debug_ctx["upload_summary"] = timeout_summary
+        log_event(logger, "UPLOAD_SUMMARY", **timeout_summary)
         raise RuntimeError(
             f"[上传视频] 等待视频上传完成超时({timeout_s}s),"
             f"表单未稳定就绪。当前 URL: {url}"
@@ -1528,7 +1717,7 @@ class AlipayPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _set_author_statement(page, statement: str):
+    async def _set_author_statement(page, statement: str, debug_ctx: dict | None = None):
         """选择作者声明(必填)。
 
         2026-07-14 实页验证:
@@ -1578,6 +1767,18 @@ class AlipayPlatform(BasePlatform):
                     await click_target.click(force=True)
                     await asyncio.sleep(0.5)
                     if await radio.is_checked():
+                        summary = {
+                            "statement": statement,
+                            "target_value": target_value,
+                            "radio_found": True,
+                            "checked_after": True,
+                            "click_strategy": click_name,
+                            "fallback_used": False,
+                            "current_url": getattr(page, "url", ""),
+                        }
+                        if isinstance(debug_ctx, dict):
+                            debug_ctx["author_summary"] = summary
+                        log_event(logger, "AUTHOR_SUMMARY", **summary)
                         logger.info(
                             "[上传视频] 已选作者声明: %s (%s) via %s",
                             statement,
@@ -1596,6 +1797,18 @@ class AlipayPlatform(BasePlatform):
                 await radio.check(force=True)
                 await asyncio.sleep(0.5)
                 if await radio.is_checked():
+                    summary = {
+                        "statement": statement,
+                        "target_value": target_value,
+                        "radio_found": True,
+                        "checked_after": True,
+                        "click_strategy": "radio.check",
+                        "fallback_used": False,
+                        "current_url": getattr(page, "url", ""),
+                    }
+                    if isinstance(debug_ctx, dict):
+                        debug_ctx["author_summary"] = summary
+                    log_event(logger, "AUTHOR_SUMMARY", **summary)
                     logger.info(
                         "[上传视频] 已选作者声明: %s (%s) via radio.check",
                         statement,
@@ -1639,9 +1852,34 @@ class AlipayPlatform(BasePlatform):
         try:
             await target_opt.wait_for(state="visible", timeout=5000)
             await target_opt.click()
+            summary = {
+                "statement": statement,
+                "target_value": target_value,
+                "radio_found": False,
+                "checked_after": True,
+                "click_strategy": "legacy-dropdown",
+                "fallback_used": True,
+                "current_url": getattr(page, "url", ""),
+            }
+            if isinstance(debug_ctx, dict):
+                debug_ctx["author_summary"] = summary
+            log_event(logger, "AUTHOR_SUMMARY", **summary)
             logger.info("[上传视频] 已选作者声明(旧版下拉): %s", statement)
             await asyncio.sleep(0.5)
         except Exception as e:
+            summary = {
+                "statement": statement,
+                "target_value": target_value,
+                "radio_found": False,
+                "checked_after": False,
+                "click_strategy": "legacy-dropdown",
+                "fallback_used": True,
+                "current_url": getattr(page, "url", ""),
+                "error": str(e),
+            }
+            if isinstance(debug_ctx, dict):
+                debug_ctx["author_summary"] = summary
+            log_event(logger, "AUTHOR_SUMMARY", **summary)
             logger.warning("[上传视频] 旧版作者声明下拉也未命中「%s」: %s", statement, e)
 
     # ------------------------------------------------------------------
@@ -1649,7 +1887,7 @@ class AlipayPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _set_schedule_time(page, schedule_time_str: str):
+    async def _set_schedule_time(page, schedule_time_str: str, debug_ctx: dict | None = None):
         """设置定时发布(文档行 67-74)。
 
         流程:
@@ -1672,6 +1910,9 @@ class AlipayPlatform(BasePlatform):
         time_str = dt.strftime("%Y-%m-%d %H:%M")
 
         # 1. 切换到"定时发布" radio
+        radio_checked = False
+        picker_confirm_clicked = False
+        actual_value = ""
         try:
             regularly_radio = page.locator(
                 'input[name="publishType"][value="regularly"]'
@@ -1682,6 +1923,7 @@ class AlipayPlatform(BasePlatform):
             await label.click(force=True)
             await asyncio.sleep(0.8)
             if await regularly_radio.is_checked():
+                radio_checked = True
                 logger.info("[上传视频] 已切换到「定时发布」")
             else:
                 raise RuntimeError("定时发布 radio 未选中")
@@ -1720,6 +1962,7 @@ class AlipayPlatform(BasePlatform):
                 ok_btn = page.get_by_role("button", name="确 定", exact=True).first
             if await ok_btn.count() > 0:
                 await ok_btn.click()
+                picker_confirm_clicked = True
                 logger.info("[上传视频] 已点击 picker「确定」")
                 await asyncio.sleep(0.5)
         except Exception as e:
@@ -1728,13 +1971,23 @@ class AlipayPlatform(BasePlatform):
                 await page.keyboard.press("Enter")
             except Exception:
                 pass
+        summary = {
+            "target_time": time_str,
+            "radio_checked": radio_checked,
+            "readback": actual_value,
+            "confirm_clicked": picker_confirm_clicked,
+            "current_url": getattr(page, "url", ""),
+        }
+        if isinstance(debug_ctx, dict):
+            debug_ctx["schedule_summary"] = summary
+        log_event(logger, "SCHEDULE_SUMMARY", **summary)
 
     # ------------------------------------------------------------------
     # Helper: click publish button
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _click_publish(page):
+    async def _click_publish(page, debug_ctx: dict | None = None):
         """点击「确认发布」按钮(文档行 11 末尾)。"""
         publish_btn = page.get_by_role(
             "button", name="确认发布", exact=True
@@ -1744,13 +1997,51 @@ class AlipayPlatform(BasePlatform):
         except Exception as e:
             raise RuntimeError(f"[上传视频] 未找到「确认发布」按钮: {e}")
 
+        if isinstance(debug_ctx, dict):
+            log_event(
+                logger,
+                "PUBLISH_PREREQ",
+                upload_summary=debug_ctx.get("upload_summary", {}),
+                author_summary=debug_ctx.get("author_summary", {}),
+                schedule_summary=debug_ctx.get("schedule_summary", {}),
+            )
+
         # 轮询 disabled(最长 60s),等表单就绪
-        for _ in range(60):
+        gate_rounds = {1, 3, 5, 10, 20, 30, 45, 60}
+        for round_no in range(1, 61):
             disabled = await publish_btn.get_attribute("disabled")
             if disabled is None:
+                gate_snapshot = await _alipay_publish_gate_snapshot(page, publish_btn)
+                log_event(
+                    logger,
+                    "PUBLISH_GATE",
+                    round=round_no,
+                    elapsed_s=round_no - 1,
+                    gate_state="enabled",
+                    **gate_snapshot,
+                )
                 break
+            if round_no in gate_rounds:
+                gate_snapshot = await _alipay_publish_gate_snapshot(page, publish_btn)
+                log_event(
+                    logger,
+                    "PUBLISH_GATE",
+                    round=round_no,
+                    elapsed_s=round_no - 1,
+                    gate_state="disabled",
+                    **gate_snapshot,
+                )
             await asyncio.sleep(1)
         else:
+            gate_snapshot = await _alipay_publish_gate_snapshot(page, publish_btn)
+            log_event(
+                logger,
+                "PUBLISH_GATE",
+                round=60,
+                elapsed_s=60,
+                gate_state="timeout",
+                **gate_snapshot,
+            )
             raise RuntimeError(
                 "[上传视频] 「确认发布」按钮一直 disabled,表单未就绪"
                 "(检查作者声明等必填项)"
@@ -1764,7 +2055,7 @@ class AlipayPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _wait_for_publish_success(page, timeout_s: int = 90, page_type: str = "video"):
+    async def _wait_for_publish_success(page, timeout_s: int = 90, page_type: str = "video", debug_ctx: dict | None = None):
         """等待发布完成信号,并处理两种弹窗。
 
         点完「确认发布」后,支付宝可能弹出两种弹窗:
@@ -1791,6 +2082,7 @@ class AlipayPlatform(BasePlatform):
         deadline = asyncio.get_event_loop().time() + timeout_s
         original_url = page.url
         modal_handled = False
+        next_progress_log = 10
 
         while asyncio.get_event_loop().time() < deadline:
             # ---- 弹窗 1:「发布请注意」优化提示弹窗(antd5-modal) ----
@@ -1846,6 +2138,13 @@ class AlipayPlatform(BasePlatform):
                     current_url != original_url
                     and publish_path not in current_url
                 ):
+                    log_event(
+                        logger,
+                        "PUBLISH_RESULT",
+                        result="url_success",
+                        current_url=current_url,
+                        modal_handled=modal_handled,
+                    )
                     logger.info("[上传视频] 发布成功(URL 已跳转: %s)", current_url)
                     return
             except Exception:
@@ -1854,13 +2153,46 @@ class AlipayPlatform(BasePlatform):
             # ---- 成功判据 2: 「发布成功」文案 ----
             try:
                 if await page.get_by_text("发布成功", exact=True).count() > 0:
+                    log_event(
+                        logger,
+                        "PUBLISH_RESULT",
+                        result="text_success",
+                        current_url=getattr(page, "url", ""),
+                        modal_handled=modal_handled,
+                    )
                     logger.info("[上传视频] 发布成功(检测到「发布成功」文案)")
                     return
             except Exception:
                 pass
 
+            elapsed_s = int(timeout_s - max(deadline - asyncio.get_event_loop().time(), 0))
+            if elapsed_s >= next_progress_log:
+                log_event(
+                    logger,
+                    "PUBLISH_WAIT",
+                    elapsed_s=elapsed_s,
+                    modal_handled=modal_handled,
+                    current_url=getattr(page, "url", ""),
+                    upload_summary=(debug_ctx or {}).get("upload_summary", {}),
+                )
+                next_progress_log += 10
             await asyncio.sleep(2)
 
+        log_event(
+            logger,
+            "PUBLISH_WAIT",
+            elapsed_s=timeout_s,
+            modal_handled=modal_handled,
+            current_url=getattr(page, "url", ""),
+            result="timeout",
+        )
+        log_event(
+            logger,
+            "PUBLISH_RESULT",
+            result="timeout",
+            current_url=getattr(page, "url", ""),
+            modal_handled=modal_handled,
+        )
         raise RuntimeError(
             f"[上传视频] 等待发布完成超时({timeout_s}s),"
             f"是否处理过弹窗: {modal_handled}"
