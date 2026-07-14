@@ -14,6 +14,7 @@ from pathlib import Path
 from queue import Queue
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 
 from conf import BASE_DIR
 
@@ -466,7 +467,11 @@ class DouyinPlatform(BasePlatform):
                 logger.info("[填写标题] 标题: %s", title)
 
                 # Wait for upload to complete
+                upload_round = 0
+                upload_retry_count = 0
+                upload_started_at = time.monotonic()
                 while True:
+                    upload_round += 1
                     try:
                         number = await page.locator(
                             '[class^="long-card"] div:has-text("重新上传")'
@@ -478,11 +483,30 @@ class DouyinPlatform(BasePlatform):
                             'div.progress-div > div:has-text("上传失败")'
                         ).count():
                             logger.warning("[上传视频] 上传失败，正在重试")
+                            upload_retry_count += 1
+                            log_event(
+                                logger,
+                                "UPLOAD_RETRY",
+                                round=upload_round,
+                                retry_count=upload_retry_count,
+                                file_path=file_path,
+                                current_url=page.url,
+                            )
                             await page.locator(
                                 "div.progress-div [class^='upload-btn-input']"
                             ).set_input_files(file_path)
                     except Exception:
                         await asyncio.sleep(2)
+                log_event(
+                    logger,
+                    "UPLOAD_SUMMARY",
+                    elapsed_s=round(time.monotonic() - upload_started_at, 1),
+                    rounds=upload_round,
+                    retry_count=upload_retry_count,
+                    ready_reason="reupload_entry_visible",
+                    current_url=page.url,
+                    file_path=file_path,
+                )
                 logger.info("[上传视频] 视频上传成功!")
 
                 # Set product link
@@ -571,20 +595,44 @@ class DouyinPlatform(BasePlatform):
 
                 # Click publish and wait for redirect
                 logger.info("[发布] 正在点击发布按钮...")
+                publish_attempt = 0
                 while True:
+                    publish_attempt += 1
                     try:
                         publish_button = page.get_by_role(
                             "button", name="发布", exact=True
                         )
+                        if publish_attempt == 1 or publish_attempt % 5 == 0:
+                            log_event(
+                                logger,
+                                "PUBLISH_GATE",
+                                attempt=publish_attempt,
+                                button_count=await publish_button.count(),
+                                current_url=page.url,
+                            )
                         if await publish_button.count():
                             await publish_button.click()
                         await page.wait_for_url(
                             "https://creator.douyin.com/creator-micro/content/manage**",
                             timeout=3000,
                         )
+                        log_event(
+                            logger,
+                            "PUBLISH_RESULT",
+                            attempt=publish_attempt,
+                            result="success",
+                            current_url=page.url,
+                        )
                         logger.info("[发布] 视频发布成功! 页面跳转到: %s", page.url)
                         break
-                    except Exception:
+                    except Exception as exc:
+                        log_event(
+                            logger,
+                            "PUBLISH_RETRY",
+                            attempt=publish_attempt,
+                            error=str(exc),
+                            current_url=page.url,
+                        )
                         # Maybe a cover selection is required
                         await self._handle_auto_video_cover(page)
                         await asyncio.sleep(0.5)
