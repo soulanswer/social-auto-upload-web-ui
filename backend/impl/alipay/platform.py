@@ -1052,18 +1052,21 @@ class AlipayPlatform(BasePlatform):
 
     @staticmethod
     async def _wait_for_upload_form(page, timeout_s: int = 14400):
-        """等待视频上传完成、表单可交互。
+        """等待表单稳定可交互。
 
-        判据(OR):
-        1. 标题输入框 ``input[placeholder*="好的标题"]`` 可见
-        2. URL 跳转到带表单的发布详情页
+        判据(AND):
+        1. 标题输入框 ``input[placeholder*="好的标题"]`` 连续可见
+        2. 上传入口文案「将视频文件拖拽到此处」已隐藏
 
         默认超时 4 小时,大文件 + 慢网络留足余量。
         """
         title_input = page.locator(
             "input[placeholder*='好的标题']"
         ).first
+        upload_prompt = page.get_by_text("将视频文件拖拽到此处").first
         deadline = asyncio.get_event_loop().time() + timeout_s
+        stable_ready_rounds = 0
+        prompt_still_visible_logged = False
 
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -1077,14 +1080,33 @@ class AlipayPlatform(BasePlatform):
             except Exception:
                 pass
 
+            title_visible = False
+            prompt_visible = False
             try:
-                if await title_input.is_visible():
-                    logger.info(
-                        "[上传视频] 标题输入框已可见,上传完成、表单可交互"
-                    )
-                    return
+                title_visible = await title_input.is_visible()
             except Exception:
                 pass
+
+            try:
+                if await upload_prompt.count() > 0:
+                    prompt_visible = await upload_prompt.is_visible()
+            except Exception:
+                prompt_visible = False
+
+            if title_visible and not prompt_visible:
+                stable_ready_rounds += 1
+                if stable_ready_rounds >= 2:
+                    logger.info(
+                        "[上传视频] 标题输入框已可见,且上传入口已隐藏,表单可交互"
+                    )
+                    return
+            else:
+                if title_visible and prompt_visible and not prompt_still_visible_logged:
+                    logger.info(
+                        "[上传视频] 标题输入框已出现,但上传入口仍可见,继续等待状态稳定"
+                    )
+                    prompt_still_visible_logged = True
+                stable_ready_rounds = 0
 
             # 进度旁证(每 60s 一次)
             try:
@@ -1104,7 +1126,7 @@ class AlipayPlatform(BasePlatform):
             url = "(unknown)"
         raise RuntimeError(
             f"[上传视频] 等待视频上传完成超时({timeout_s}s),"
-            f"标题输入框未出现。当前 URL: {url}"
+            f"表单未稳定就绪。当前 URL: {url}"
         )
 
     # ------------------------------------------------------------------
@@ -1507,23 +1529,20 @@ class AlipayPlatform(BasePlatform):
 
     @staticmethod
     async def _set_author_statement(page, statement: str):
-        """选择作者声明(必填,文档 ~/zfb.md 行 76-81)。
+        """选择作者声明(必填)。
 
-        6 个选项:内容无需标注 / 个人观点,仅供参考 / 内容由AI生成 /
-        内容虚构演绎,仅供娱乐 / 内容含营销信息 / 内容为转载
+        2026-07-14 实页验证:
+        - 作者声明不是旧版下拉,而是 ``input[name="tagList"]`` 的 radio 组
+        - 每个 radio 的 value 稳定,祖先 ``label`` 可直接点击
+        - 文案 -> value:
+          内容无需标注 -> NO_STATEMENT
+          个人观点，仅供参考 -> S_AT2
+          内容由AI生成 -> A_AG3
+          内容虚构演绎，仅供娱乐 -> S_AT1
+          内容含营销信息 -> S_AT4
+          内容为转载 -> S_AT3
 
-        DOM(2026-06-24 实测):
-        - 搜索 input: ``input[id$='_tagList']`` (ID 有随机前缀,后缀稳定)
-          属性: role=combobox, readonly, aria-required=true
-        - select 容器: input 的祖先中 role=combobox 或含 arrow 的 div
-        - option: ``[role='option'][title="内容由AI生成"]`` (title 稳定)
-
-        **禁止用 class 定位**(antd5 + CSS modules hash 会漂移)。
-
-        流程:
-        1. 通过 input[id$='_tagList'] 定位搜索框
-        2. 点其父级展开下拉
-        3. 点 [role='option'][title="..."] 精确匹配
+        为兼容旧版页面,仍保留旧下拉逻辑兜底。
         """
         if not statement:
             logger.warning(
@@ -1531,59 +1550,99 @@ class AlipayPlatform(BasePlatform):
             )
             return
 
-        # 1. 通过 input[id$='_tagList'] 定位搜索框(input 有 role=combobox)
+        statement = statement.strip()
+        statement_value_map = {
+            "内容无需标注": "NO_STATEMENT",
+            "个人观点，仅供参考": "S_AT2",
+            "内容由AI生成": "A_AG3",
+            "内容虚构演绎，仅供娱乐": "S_AT1",
+            "内容含营销信息": "S_AT4",
+            "内容为转载": "S_AT3",
+        }
+        target_value = statement_value_map.get(statement, statement)
+
+        # 1. 新版页面: radio 组
+        radio = page.locator(
+            f'input[name="tagList"][value="{target_value}"]'
+        ).first
+        try:
+            await radio.wait_for(state="attached", timeout=10000)
+            label = radio.locator("xpath=ancestor::label[1]").first
+            click_attempts = [
+                ("label", label),
+                ("label-text", label.locator("span.antd5-radio-label").first),
+                ("radio-span", label.locator("span.antd5-radio").first),
+            ]
+            for click_name, click_target in click_attempts:
+                try:
+                    await click_target.click(force=True)
+                    await asyncio.sleep(0.5)
+                    if await radio.is_checked():
+                        logger.info(
+                            "[上传视频] 已选作者声明: %s (%s) via %s",
+                            statement,
+                            target_value,
+                            click_name,
+                        )
+                        return
+                except Exception as click_error:
+                    logger.info(
+                        "[上传视频] 作者声明 %s 点击失败(继续兜底): %s",
+                        click_name,
+                        click_error,
+                    )
+
+            try:
+                await radio.check(force=True)
+                await asyncio.sleep(0.5)
+                if await radio.is_checked():
+                    logger.info(
+                        "[上传视频] 已选作者声明: %s (%s) via radio.check",
+                        statement,
+                        target_value,
+                    )
+                    return
+            except Exception as check_error:
+                logger.info(
+                    "[上传视频] 作者声明 radio.check 失败(继续兜底): %s",
+                    check_error,
+                )
+
+            logger.warning(
+                "[上传视频] 作者声明 radio 多次点击后仍未选中: %s (%s)",
+                statement,
+                target_value,
+            )
+        except Exception as e:
+            logger.warning(
+                "[上传视频] 未找到作者声明 radio「%s」(%s): %s",
+                statement,
+                target_value,
+                e,
+            )
+
+        # 2. 兼容旧版下拉 DOM
         search_input = page.locator(
             "input[id$='_tagList'][role='combobox']"
         ).first
         try:
-            await search_input.wait_for(state="visible", timeout=10000)
-        except Exception as e:
-            logger.warning("[上传视频] 未找到作者声明搜索框: %s", e)
-            return
-
-        # 2. 点搜索框展开下拉(它 readonly,点击会冒泡到父级 select 触发展开)
-        try:
+            await search_input.wait_for(state="visible", timeout=3000)
             await search_input.click()
             await asyncio.sleep(0.8)
-            logger.info("[上传视频] 已点击作者声明搜索框,等待下拉")
-        except Exception as e:
-            logger.warning("[上传视频] 点击作者声明搜索框失败: %s", e)
+            logger.info("[上传视频] 作者声明 radio 未命中,回退旧版下拉逻辑")
+        except Exception:
             return
 
-        # 3. 等 option 渲染,点 title 精确匹配项
-        #    选项 DOM: <div aria-selected="false" title="内容由AI生成">...</div>
-        #    没有 role='option',只用 title 属性定位(稳定,不依赖 class)
         target_opt = page.locator(
-            f"[title='{statement.strip()}']"
+            f"[title='{statement}']"
         ).first
         try:
-            await target_opt.wait_for(state="visible", timeout=10000)
+            await target_opt.wait_for(state="visible", timeout=5000)
             await target_opt.click()
-            logger.info("[上传视频] 已选作者声明: %s", statement)
+            logger.info("[上传视频] 已选作者声明(旧版下拉): %s", statement)
             await asyncio.sleep(0.5)
-            return
         except Exception as e:
-            logger.warning(
-                "[上传视频] 未找到作者声明选项「%s」: %s", statement, e
-            )
-
-        # 兜底:列出所有带 title 的下拉项辅助排查
-        try:
-            titles = await page.evaluate("""() => {
-                const holder = document.querySelector(".rc-virtual-list-holder-inner");
-                if (!holder) return [];
-                return Array.from(holder.children)
-                    .map(o => o.getAttribute('title'))
-                    .filter(Boolean);
-            }""")
-            logger.info("[上传视频] 当前下拉可选项: %s", titles)
-        except Exception:
-            pass
-
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
+            logger.warning("[上传视频] 旧版作者声明下拉也未命中「%s」: %s", statement, e)
 
     # ------------------------------------------------------------------
     # Helper: set schedule time (定时发布)
@@ -1619,17 +1678,20 @@ class AlipayPlatform(BasePlatform):
             ).first
             await regularly_radio.wait_for(state="attached", timeout=10000)
             # radio 可能在 label 内,用 click label 父级
-            label = regularly_radio.locator("xpath=ancestor::label[1]")
+            label = regularly_radio.locator("xpath=ancestor::label[1]").first
             await label.click(force=True)
-            logger.info("[上传视频] 已切换到「定时发布」")
             await asyncio.sleep(0.8)
+            if await regularly_radio.is_checked():
+                logger.info("[上传视频] 已切换到「定时发布」")
+            else:
+                raise RuntimeError("定时发布 radio 未选中")
         except Exception as e:
             logger.warning("[上传视频] 切换定时发布失败: %s", e)
             return
 
         # 2. 直接填 picker 输入框
         schedule_input = page.locator(
-            "input[id$='_scheduleTime']"
+            "input[id$='_scheduleTime'], input[placeholder='请选择日期']"
         ).first
         try:
             await schedule_input.wait_for(state="visible", timeout=10000)
@@ -1639,14 +1701,23 @@ class AlipayPlatform(BasePlatform):
             await schedule_input.fill("")
             await schedule_input.type(time_str, delay=50)
             await asyncio.sleep(0.5)
-            logger.info("[上传视频] 已填定时时间: %s", time_str)
+            actual_value = (await schedule_input.input_value() or "").strip()
+            logger.info("[上传视频] 已填定时时间: %s (回读=%s)", time_str, actual_value)
+            if actual_value != time_str:
+                logger.warning(
+                    "[上传视频] 定时输入框回读不一致: target=%s actual=%s",
+                    time_str,
+                    actual_value,
+                )
         except Exception as e:
             logger.warning("[上传视频] 填定时时间失败: %s", e)
             return
 
         # 3. 点"确定"按钮关闭 picker
         try:
-            ok_btn = page.get_by_role("button", name="确 定", exact=True).first
+            ok_btn = page.get_by_role("button", name="确定", exact=True).first
+            if await ok_btn.count() == 0:
+                ok_btn = page.get_by_role("button", name="确 定", exact=True).first
             if await ok_btn.count() > 0:
                 await ok_btn.click()
                 logger.info("[上传视频] 已点击 picker「确定」")
