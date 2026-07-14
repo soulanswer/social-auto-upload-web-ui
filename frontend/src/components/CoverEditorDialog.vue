@@ -265,9 +265,21 @@ function onTimelineSelect(seconds) {
 }
 
 function onMaterialSelect(material) {
-  const url = material.url || getFileUrl(material.stored_path)
-  currentImageSrc.value = url
-  loadImageToCanvas(url)
+  const coverData = {
+    id: material.id,
+    name: material.name,
+    url: material.url || getFileUrl(material.stored_path),
+    stored_path: material.stored_path,
+    size: material.size,
+    type: material.type,
+  }
+
+  // Material-library images are already stored assets, so reuse them directly.
+  if (activeTab.value === 'portrait') emit('update:coverPortrait', coverData)
+  else emit('update:coverLandscape', coverData)
+
+  ElMessage.success('素材已直接设为封面')
+  visible.value = false
 }
 
 function triggerLocalUpload() { fileInputRef.value?.click() }
