@@ -818,10 +818,12 @@ class KuaishouPlatform(BasePlatform):
         """
         if not tags:
             return
+        def _normalize_topic_name(value: str) -> str:
+            return (value or "").strip().lstrip("#").strip()
+
         # CDP session 提到循环外,每个标签复用同一个连接
         cdp = await page.context.new_cdp_session(page)
         for tag in tags[:max_n]:
-            text = f"#{tag}"
             # 1. 通过 CDP Input.dispatchKeyEvent 直接发 keydown/keyup,显式指定
             #    text='#' / key='#' / modifiers=8(Shift 位),保证插入的字符是 #
             #    且 React 能读到 event.key='#' + event.shiftKey=true。
@@ -862,25 +864,41 @@ class KuaishouPlatform(BasePlatform):
             # 3. 等 React 监听完成,激活下拉
             await asyncio.sleep(2)
 
-            # 3. 检测下拉 + 点击 _active_ 高亮项
+            # 3. 检测下拉并只选择与目标标签精确匹配的候选项
             dropdown = page.locator('div[class*="_dropdown-container_"]').first
             try:
                 await dropdown.wait_for(state="visible", timeout=3000)
-                active = page.locator(
-                    'div[class*="_topic-item_"][class*="_active_"]'
-                ).first
-                if await active.count() and await active.is_visible():
+                items = page.locator('div[class*="_topic-item_"]')
+                item_count = await items.count()
+                candidates = []
+                for item_index in range(item_count):
+                    item = items.nth(item_index)
                     try:
-                        tag_name_el = active.locator('span[class*="_at-tag-name_"]').first
+                        tag_name_el = item.locator(
+                            'span[class*="_at-tag-name_"]'
+                        ).first
                         tag_name = (await tag_name_el.text_content() or "").strip()
+                        if not tag_name:
+                            item_text = (await item.text_content() or "").strip()
+                            tag_name = item_text.splitlines()[0].strip() if item_text else ""
                     except Exception:
                         tag_name = ""
-                    await active.click()
-                    logger.info("[填写标签] 选中下拉高亮项: #%s", tag_name or "?")
-                    await asyncio.sleep(0.5)
-                    continue  # 成功选中,跳过空格兜底
+                    if tag_name:
+                        candidates.append(tag_name)
+                    if _normalize_topic_name(tag_name) == _normalize_topic_name(tag):
+                        await item.click()
+                        logger.info("[填写标签] 精确匹配下拉项: %s", tag_name)
+                        await asyncio.sleep(0.5)
+                        break
+                else:
+                    logger.info(
+                        "[填写标签] 下拉存在但无精确匹配, 候选=%s, 改用空格确认",
+                        candidates[:5],
+                    )
+                    raise LookupError("no exact topic match")
+                continue  # 成功选中,跳过空格兜底
             except Exception as exc:
-                logger.info("[填写标签] 下拉未出现 / 点击失败 (%s),改用空格确认", exc)
+                logger.info("[填写标签] 下拉未出现 / 无精确匹配 (%s),改用空格确认", exc)
 
             # 4. 退路:按下空格确认(同 xhs/zhihu),确保 #xxx 至少变成话题芯片
             await page.keyboard.press("Space")
