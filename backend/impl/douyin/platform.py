@@ -684,7 +684,7 @@ class DouyinPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _set_schedule_time(page, publish_date):
+    async def _set_schedule_time_legacy_unused(page, publish_date):
         label_element = page.locator("[class^='radio']:has-text('定时发布')")
         await label_element.click()
         await asyncio.sleep(1)
@@ -700,6 +700,186 @@ class DouyinPlatform(BasePlatform):
     # ------------------------------------------------------------------
     # Helper: set product link (购物车)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_schedule_picker_value(raw_text: str) -> str:
+        digits = "".join(re.findall(r"\d+", raw_text or ""))
+        if not digits:
+            return ""
+        return digits[-2:].zfill(2)
+
+    @staticmethod
+    async def _read_schedule_input_value(date_input) -> str:
+        try:
+            return (await date_input.input_value() or "").strip()
+        except Exception:
+            try:
+                return (
+                    await date_input.evaluate(
+                        "el => el.value || el.getAttribute('value') || el.textContent || ''"
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                return ""
+
+    @staticmethod
+    async def _activate_schedule_mode(page, date_input) -> None:
+        schedule_label = page.locator("label").filter(has_text="定时发布").first
+        schedule_input = schedule_label.locator('input[value="1"]').first
+
+        # 抖音这里是自绘 radio，点 input 本身不稳定，点整行 label 更容易切到定时态
+        await schedule_label.wait_for(state="visible", timeout=10000)
+        await schedule_label.wait_for(state="visible", timeout=10000)
+        for _ in range(3):
+            await schedule_label.click(force=True)
+            await asyncio.sleep(0.4)
+            try:
+                if await schedule_input.evaluate("el => !!el.checked"):
+                    return
+            except Exception:
+                pass
+            if await date_input.count() > 0 and await date_input.is_visible():
+                return
+
+        await date_input.wait_for(state="visible", timeout=10000)
+
+    @staticmethod
+    async def _ensure_schedule_date_view(panel) -> None:
+        date_switch = panel.locator(".semi-datepicker-switch-date").first
+        if await date_switch.count() > 0:
+            await date_switch.click(force=True)
+            await asyncio.sleep(0.2)
+
+    @staticmethod
+    async def _navigate_schedule_month(panel, target_year: int, target_month: int) -> None:
+        month_label = panel.locator(".semi-datepicker-navigation-month").first
+        nav_buttons = panel.locator(".semi-datepicker-navigation button")
+        prev_button = nav_buttons.nth(0)
+        next_button = nav_buttons.nth(2)
+
+        for _ in range(24):
+            text = (await month_label.text_content() or "").strip()
+            m = re.search(r"(\d{4}).*?(\d{1,2})", text)
+            if not m:
+                return
+            current_year = int(m.group(1))
+            current_month = int(m.group(2))
+            if (current_year, current_month) == (target_year, target_month):
+                return
+            if (current_year, current_month) < (target_year, target_month):
+                await next_button.click(force=True)
+            else:
+                await prev_button.click(force=True)
+            await asyncio.sleep(0.35)
+
+    @staticmethod
+    async def _pick_schedule_date(panel, publish_date) -> None:
+        await DouyinPlatform._ensure_schedule_date_view(panel)
+        await DouyinPlatform._navigate_schedule_month(
+            panel, publish_date.year, publish_date.month
+        )
+
+        # 日期格子有稳定的 title=YYYY-MM-DD，直接点格子即可生效
+        target_date = publish_date.strftime("%Y-%m-%d")
+        target_cell = panel.locator(
+            f'.semi-datepicker-day[title="{target_date}"]'
+        ).first
+        await target_cell.wait_for(state="visible", timeout=10000)
+        cell_class = await target_cell.get_attribute("class") or ""
+        if "semi-datepicker-day-disabled" in cell_class:
+            raise RuntimeError(f"抖音目标日期不可选: {target_date}")
+        await target_cell.click(force=True)
+        await asyncio.sleep(0.3)
+
+    @staticmethod
+    async def _pick_schedule_wheel_value(page, wheel, target_value: str, field_name: str) -> None:
+        await wheel.wait_for(state="visible", timeout=10000)
+        box = await wheel.bounding_box()
+        if not box:
+            raise RuntimeError(f"抖音时间滚轮不可见: {field_name}")
+
+        current_value = ""
+        max_value = 23 if field_name == "hour" else 59
+        # 实测这个 Semi 滚轮只有真实 wheel/scroll 才会更新选中项，点 li 不生效
+        # 40 是接近单格的滚动步长：小时基本一滚一格，分钟需要多次滚动逼近目标值
+        step_delta = 40
+
+        # 实测这个 Semi 滚轮只有真实 wheel/scroll 才会更新选中项，点 li 不生效
+        # 40 是接近单格的滚动步长：小时基本一滚一格，分钟需要多次滚动逼近目标值
+        step_delta = 40
+
+        step_delta = 40
+        for _ in range(max_value + 4):
+            selected_item = wheel.locator("li.semi-scrolllist-item-selected").first
+            selected_text = await selected_item.text_content() or ""
+            current_value = DouyinPlatform._normalize_schedule_picker_value(selected_text)
+            if current_value == target_value:
+                return
+
+            try:
+                current_num = int(current_value)
+                target_num = int(target_value)
+            except Exception:
+                break
+
+            forward_steps = (target_num - current_num) % (max_value + 1)
+            backward_steps = (current_num - target_num) % (max_value + 1)
+            delta = step_delta if forward_steps <= backward_steps else -step_delta
+
+            await page.mouse.move(
+                box["x"] + box["width"] / 2,
+                box["y"] + box["height"] / 2,
+            )
+            await page.mouse.wheel(0, delta)
+            await asyncio.sleep(0.45)
+
+        raise RuntimeError(
+            f"抖音时间滚轮选中失败: {field_name}={target_value} actual={current_value or '(empty)'}"
+        )
+
+    @staticmethod
+    async def _pick_schedule_time(page, panel, publish_date) -> None:
+        # 切到时间面板后，两个滚轮依次是小时、分钟
+        time_switch = panel.locator(".semi-datepicker-switch-time").first
+        await time_switch.click(force=True)
+        await asyncio.sleep(0.3)
+
+        wheels = panel.locator(".semi-scrolllist-item-wheel")
+        await DouyinPlatform._pick_schedule_wheel_value(
+            page, wheels.nth(0), f"{publish_date.hour:02d}", "hour"
+        )
+        await DouyinPlatform._pick_schedule_wheel_value(
+            page, wheels.nth(1), f"{publish_date.minute:02d}", "minute"
+        )
+
+    @staticmethod
+    async def _set_schedule_time(page, publish_date):
+        target_value = publish_date.strftime("%Y-%m-%d %H:%M")
+        date_input = page.locator('input[format="yyyy-MM-dd HH:mm"]').first
+
+        await DouyinPlatform._activate_schedule_mode(page, date_input)
+        await date_input.click(force=True)
+        await asyncio.sleep(0.4)
+
+        panel = page.locator(".semi-portal-inner .semi-datepicker").last
+        await panel.wait_for(state="visible", timeout=10000)
+
+        await DouyinPlatform._pick_schedule_date(panel, publish_date)
+        await DouyinPlatform._pick_schedule_time(page, panel, publish_date)
+
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+        # 这里必须读回输入框确认页面已真正接受这个时间，避免 UI 看起来选中了但值没提交
+        actual_value = await DouyinPlatform._read_schedule_input_value(date_input)
+        if actual_value != target_value:
+            raise RuntimeError(
+                f"抖音定时时间设置未生效: target={target_value} actual={actual_value or '(empty)'}"
+            )
 
     @staticmethod
     async def _set_product_link(page, product_link: str, product_title: str):
