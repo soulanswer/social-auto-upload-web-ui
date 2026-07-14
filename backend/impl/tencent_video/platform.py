@@ -17,6 +17,7 @@ from queue import Queue
 from conf import BASE_DIR
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 from .._browser import create_browser_sync, create_context_sync
 from .._utils import clear_and_type, get_account_name_by_cookie_file, parse_schedule_time, save_login_result
 from ..base_platform import BasePlatform
@@ -414,7 +415,16 @@ class TencentVideoPlatform(BasePlatform):
                 # Step 2.5: 等待真正的上传完成 HTTP 请求（formTitle 只是
                 # UI 提示，不是后端完成的权威信号）
                 # 无超时:视频可能很大(≤16G),一直等到 UploadNotify 到达
+                upload_wait_started_at = time.monotonic()
                 await upload_done.wait()
+                log_event(
+                    logger,
+                    "UPLOAD_SUMMARY",
+                    elapsed_s=round(time.monotonic() - upload_wait_started_at, 1),
+                    ready_reason="upload_notify_request",
+                    current_url=page.url,
+                    file_path=file_path,
+                )
                 logger.info(
                     "视频上传完成（检测到 UploadNotify 请求）"
                 )
@@ -647,6 +657,13 @@ class TencentVideoPlatform(BasePlatform):
             'button[dt-mpid="video_submit_click"]'
         ).first
         await publish_btn.wait_for(state="visible", timeout=10000)
+        log_event(
+            logger,
+            "PUBLISH_GATE",
+            stage="button_visible",
+            current_url=page.url,
+            button_disabled_attr=await publish_btn.get_attribute("disabled"),
+        )
 
         # Check if button is disabled before clicking
         disabled = await publish_btn.get_attribute("disabled")
@@ -657,13 +674,29 @@ class TencentVideoPlatform(BasePlatform):
                 " && !document.querySelector('button[dt-mpid=\"video_submit_click\"]').disabled",
                 timeout=30_000,
             )
+            log_event(
+                logger,
+                "PUBLISH_GATE",
+                stage="button_enabled_after_wait",
+                current_url=page.url,
+                button_disabled_attr=await publish_btn.get_attribute("disabled"),
+            )
 
         await publish_btn.click()
+        log_event(logger, "PUBLISH_GATE", stage="clicked", current_url=page.url)
         logger.info("[发布] Publish button clicked, waiting for publish result")
 
         # Wait up to 60s for success indicators
         success = False
         for i in range(60):
+            if i in {0, 5, 10, 20, 30, 45, 59}:
+                log_event(
+                    logger,
+                    "PUBLISH_WAIT",
+                    round=i + 1,
+                    current_url=page.url,
+                    button_enabled=await publish_btn.is_enabled(),
+                )
             try:
                 # Check for success text on the page
                 success_text = page.locator(
@@ -701,8 +734,10 @@ class TencentVideoPlatform(BasePlatform):
             await asyncio.sleep(1)
 
         if success:
+            log_event(logger, "PUBLISH_RESULT", result="success", current_url=page.url)
             logger.info("[发布] Video published successfully")
         else:
+            log_event(logger, "PUBLISH_RESULT", result="timeout", current_url=page.url)
             logger.error("[发布] Publish indicator not found within 60s timeout")
             raise Exception("发布失败：未检测到发布成功信号（页面未跳转，无成功文本）")
 
