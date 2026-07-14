@@ -14,6 +14,7 @@ from queue import Queue
 from conf import BASE_DIR
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 from .._browser import create_browser_sync, create_context_sync
 from .._utils import clear_and_type, get_account_name_by_cookie_file, parse_schedule_time, save_login_result
 from ..base_platform import BasePlatform
@@ -496,6 +497,7 @@ class IqiyiPlatform(BasePlatform):
         继续观察 ``.up-phone-card`` 是否消失；若始终未出现进度卡，则
         退回到表单稳定可见的保守判定。
         """
+        started_at = time.monotonic()
         await upload_done.wait()
         logger.info("检测到 /upload/record 请求，继续等待页面上传进度完成")
 
@@ -540,6 +542,13 @@ class IqiyiPlatform(BasePlatform):
             else:
                 if saw_upload_card:
                     logger.info("[iqiyi] 上传区域已消失,视频上传完成")
+                    log_event(
+                        logger,
+                        "UPLOAD_SUMMARY",
+                        elapsed_s=round(time.monotonic() - started_at, 1),
+                        ready_reason="upload_card_disappeared",
+                        current_url=page.url,
+                    )
                     return
 
                 try:
@@ -554,12 +563,26 @@ class IqiyiPlatform(BasePlatform):
                     stable_ready_rounds += 1
                     if stable_ready_rounds >= 5:
                         logger.info("[iqiyi] 未检测到上传区域,表单已稳定可见,继续后续流程")
+                        log_event(
+                            logger,
+                            "UPLOAD_SUMMARY",
+                            elapsed_s=round(time.monotonic() - started_at, 1),
+                            ready_reason="form_ready_stable_without_upload_card",
+                            current_url=page.url,
+                        )
                         return
                 else:
                     stable_ready_rounds = 0
 
             await asyncio.sleep(2)
 
+        log_event(
+            logger,
+            "UPLOAD_SUMMARY",
+            elapsed_s=round(time.monotonic() - started_at, 1),
+            ready_reason="timeout",
+            current_url=page.url,
+        )
         raise TimeoutError("[iqiyi] 等待视频上传完成超时(1800s)")
 
     # ------------------------------------------------------------------
@@ -948,7 +971,15 @@ class IqiyiPlatform(BasePlatform):
             ).first
 
             await publish_btn.wait_for(state="visible", timeout=10000)
+            log_event(
+                logger,
+                "PUBLISH_GATE",
+                stage="button_visible",
+                current_url=page.url,
+                button_count=await publish_btn.count(),
+            )
             await publish_btn.click()
+            log_event(logger, "PUBLISH_GATE", stage="clicked", current_url=page.url)
             logger.info("[发布] Publish button clicked, waiting for navigation")
 
             # 等待 URL 离开发布页（最多 60s）
@@ -958,6 +989,7 @@ class IqiyiPlatform(BasePlatform):
                     timeout=60000,
                 )
             except Exception:
+                log_event(logger, "PUBLISH_RESULT", result="url_timeout", current_url=page.url)
                 logger.warning(
                     "Publish failed — still on publish page after 60s timeout. "
                     "URL: %s", page.url
@@ -970,6 +1002,7 @@ class IqiyiPlatform(BasePlatform):
             # 判定 1: URL 包含 success / published / done 路径
             current_url = page.url.lower()
             if any(kw in current_url for kw in ("/success", "published", "/done")):
+                log_event(logger, "PUBLISH_RESULT", result="url_success", current_url=page.url)
                 logger.info("[发布] URL 命中成功路径关键词: %s", page.url)
                 logger.info("[发布] Video published successfully")
                 return True
@@ -979,6 +1012,7 @@ class IqiyiPlatform(BasePlatform):
             for kw in success_keywords:
                 try:
                     if await page.get_by_text(kw, exact=False).count() > 0:
+                        log_event(logger, "PUBLISH_RESULT", result="keyword_success", keyword=kw, current_url=page.url)
                         logger.info("页面文本命中成功关键词: %r", kw)
                         logger.info("[发布] Video published successfully")
                         return True
@@ -989,6 +1023,7 @@ class IqiyiPlatform(BasePlatform):
             for kw in error_keywords:
                 try:
                     if await page.get_by_text(kw, exact=False).count() > 0:
+                        log_event(logger, "PUBLISH_RESULT", result="keyword_error", keyword=kw, current_url=page.url)
                         logger.warning("[发布] 页面文本命中失败关键词 %r, 当前 URL: %s", kw, page.url)
                         return False
                 except Exception:
@@ -1003,6 +1038,7 @@ class IqiyiPlatform(BasePlatform):
                     for kw in success_keywords:
                         try:
                             if await page.get_by_text(kw, exact=False).count() > 0:
+                                log_event(logger, "PUBLISH_RESULT", result="keyword_success", keyword=kw, current_url=page.url)
                                 logger.info("页面文本命中成功关键词: %r", kw)
                                 logger.info("[发布] Video published successfully")
                                 return True
@@ -1012,6 +1048,7 @@ class IqiyiPlatform(BasePlatform):
                     for kw in error_keywords:
                         try:
                             if await page.get_by_text(kw, exact=False).count() > 0:
+                                log_event(logger, "PUBLISH_RESULT", result="keyword_error", keyword=kw, current_url=page.url)
                                 logger.warning(
                                     "[发布] 页面文本命中失败关键词 %r, 当前 URL: %s",
                                     kw, page.url,
@@ -1030,6 +1067,7 @@ class IqiyiPlatform(BasePlatform):
                     if not btn_visible:
                         hidden_rounds += 1
                         if hidden_rounds >= 3:
+                            log_event(logger, "PUBLISH_RESULT", result="button_hidden_success", current_url=page.url)
                             logger.info("[iqiyi] 提交后页面已无发布按钮,按成功处理")
                             return True
                     else:
@@ -1037,10 +1075,12 @@ class IqiyiPlatform(BasePlatform):
 
                     await asyncio.sleep(2)
 
+                log_event(logger, "PUBLISH_RESULT", result="settled_success", current_url=page.url)
                 logger.info("[iqiyi] 已知提交后页面未检测到失败信号,按成功处理: %s", page.url)
                 return True
 
             # 所有判定都不满足 → 视为跳转到了非成功页（如内容管理页）
+            log_event(logger, "PUBLISH_RESULT", result="unknown_page", current_url=page.url)
             logger.warning(
                 "URL 已离开发布页，但未检测到成功标志（关键词 %s）"
                 "。当前 URL: %s",
