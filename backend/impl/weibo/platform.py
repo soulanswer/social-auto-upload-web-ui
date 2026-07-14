@@ -17,6 +17,7 @@ from .._utils import (
 )
 from ..base_platform import BasePlatform
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 
 from . import categories as _weibo_categories
 
@@ -569,12 +570,28 @@ class WeiboPlatform(BasePlatform):
             try:
                 disabled = await send_btn.get_attribute("disabled")
                 if disabled is None:
+                    log_event(
+                        logger,
+                        "UPLOAD_SUMMARY",
+                        page_type="image",
+                        elapsed_s=round(300 - max(deadline - asyncio.get_event_loop().time(), 0), 1),
+                        ready_reason="send_button_enabled",
+                        current_url=page.url,
+                    )
                     logger.info("[发布] 图片已上传,发送按钮已启用")
                     return
             except Exception:
                 pass
             await asyncio.sleep(2)
 
+        log_event(
+            logger,
+            "UPLOAD_SUMMARY",
+            page_type="image",
+            elapsed_s=300,
+            ready_reason="timeout_waiting_send_enabled",
+            current_url=page.url,
+        )
         raise RuntimeError("[发布] 5 分钟内图片未上传完成(发送按钮未启用)")
 
     # ------------------------------------------------------------------
@@ -595,15 +612,26 @@ class WeiboPlatform(BasePlatform):
             raise RuntimeError(f"[发布] 未找到「发送」按钮: {e}")
 
         # 轮询 disabled(最长 60s)
-        for _ in range(60):
+        for round_no in range(1, 61):
             disabled = await send_btn.get_attribute("disabled")
             if disabled is None:
                 break
+            if round_no in {1, 3, 5, 10, 20, 30, 45, 60}:
+                log_event(
+                    logger,
+                    "PUBLISH_GATE",
+                    page_type="image",
+                    round=round_no,
+                    button="send",
+                    disabled_attr=disabled,
+                    current_url=page.url,
+                )
             await asyncio.sleep(1)
         else:
             raise RuntimeError("[发布] 「发送」按钮一直 disabled,表单未就绪")
 
         await send_btn.click()
+        log_event(logger, "PUBLISH_GATE", page_type="image", stage="clicked", button="send", current_url=page.url)
         logger.info("[发布] 已点击「发送」按钮")
 
     # ------------------------------------------------------------------
@@ -1085,6 +1113,16 @@ class WeiboPlatform(BasePlatform):
                             "[发布] 「上传中」DOM 仍存在,但「发布」按钮已可见,"
                             "视为上传完成、表单可交互(转码阶段 spinner 暂未消失)"
                         )
+                    log_event(
+                        logger,
+                        "UPLOAD_SUMMARY",
+                        page_type="video",
+                        elapsed_s=round(timeout_s - max(deadline - asyncio.get_event_loop().time(), 0), 1),
+                        ready_reason="uploading_gone_or_publish_visible",
+                        uploading_gone=uploading_gone,
+                        publish_visible=publish_visible,
+                        current_url=page.url,
+                    )
                     return
             except Exception:
                 pass
@@ -1120,6 +1158,14 @@ class WeiboPlatform(BasePlatform):
             url = page.url
         except Exception:
             url = "(unknown)"
+        log_event(
+            logger,
+            "UPLOAD_SUMMARY",
+            page_type="video",
+            elapsed_s=timeout_s,
+            ready_reason="timeout",
+            current_url=url,
+        )
         raise RuntimeError(
             f"[发布] 等待视频上传完成超时({timeout_s}s = "
             f"{timeout_s // 60}min),「上传中」未消失且「发布」按钮未可见。"
@@ -1696,15 +1742,26 @@ class WeiboPlatform(BasePlatform):
             raise RuntimeError(f"[发布] 未找到发布按钮: {e}")
 
         # 轮询 disabled 属性(最长 60s)
-        for _ in range(60):
+        for round_no in range(1, 61):
             disabled = await publish_btn.get_attribute("disabled")
             if disabled is None:
                 break
+            if round_no in {1, 3, 5, 10, 20, 30, 45, 60}:
+                log_event(
+                    logger,
+                    "PUBLISH_GATE",
+                    page_type="video",
+                    round=round_no,
+                    button="publish",
+                    disabled_attr=disabled,
+                    current_url=page.url,
+                )
             await asyncio.sleep(1)
         else:
             raise RuntimeError("[发布] 发布按钮一直 disabled,表单未就绪")
 
         await publish_btn.click()
+        log_event(logger, "PUBLISH_GATE", page_type="video", stage="clicked", button="publish", current_url=page.url)
         logger.info("[发布] 已点击发布按钮")
 
     # ------------------------------------------------------------------
@@ -1723,14 +1780,17 @@ class WeiboPlatform(BasePlatform):
             await page.locator(
                 "text=视频已上传成功"
             ).first.wait_for(state="visible", timeout=timeout_s * 1000)
+            log_event(logger, "PUBLISH_RESULT", page_type="video", result="toast_success", current_url=page.url)
             logger.info("[发布] 发布成功(检测到「视频已上传成功」toast)")
         except Exception:
             # 兜底: 看 URL 是否跳走
             await asyncio.sleep(3)
             current = page.url
             if "weibo.com/upload/channel" not in current:
+                log_event(logger, "PUBLISH_RESULT", page_type="video", result="url_success", current_url=current)
                 logger.info("[发布] 发布成功(URL 已跳转: %s)", current)
             else:
+                log_event(logger, "PUBLISH_RESULT", page_type="video", result="timeout", current_url=current)
                 raise RuntimeError(
                     f"[发布] 发布后未检测到成功信号,当前 URL: {current}"
                 )
