@@ -488,19 +488,79 @@ class IqiyiPlatform(BasePlatform):
         page,
         upload_done: asyncio.Event,
     ) -> None:
-        """等待视频上传到服务器完成。
+        """等待视频上传真正完成。
 
-        监听 ``/v-tool/api/1.0/upload/record`` HTTP 请求被触发
-        （caller 负责在 ``set_input_files`` 之前注册监听器）。这是
-        服务端确认上传完成的权威信号——DOM 提示可能提前消失，不能
-        作为完成依据。
-
-        无超时:视频可能很大(≤16G),一直等到上传完成请求到达。
+        ``/v-tool/api/1.0/upload/record`` 只能证明服务端已收到上传记录，
+        不能证明前端上传进度已经走完。日志里已出现 record 很早触发，
+        但真正点击发布前页面仍显示 81% / 91% 进度的情况，因此这里
+        继续观察 ``.up-phone-card`` 是否消失；若始终未出现进度卡，则
+        退回到表单稳定可见的保守判定。
         """
         await upload_done.wait()
-        logger.info(
-            "检测到 /upload/record 请求，视频上传完成"
-        )
+        logger.info("检测到 /upload/record 请求，继续等待页面上传进度完成")
+
+        upload_card = page.locator('.up-phone-card').first
+        form_ready = page.locator('[class*="wemedia-catalog-form"]').first
+        deadline = asyncio.get_event_loop().time() + 1800
+        saw_upload_card = False
+        stable_ready_rounds = 0
+        last_percent = ""
+
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                fail_text = page.get_by_text("上传失败", exact=False)
+                if await fail_text.count() > 0:
+                    raise RuntimeError("视频上传失败")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+
+            card_visible = False
+            try:
+                card_visible = (
+                    await upload_card.count() > 0
+                    and await upload_card.is_visible()
+                )
+            except Exception:
+                card_visible = False
+
+            if card_visible:
+                saw_upload_card = True
+                stable_ready_rounds = 0
+                try:
+                    percent_el = upload_card.locator('.up-progress-percent').first
+                    if await percent_el.count() > 0:
+                        percent_text = (await percent_el.text_content() or "").strip()
+                        if percent_text and percent_text != last_percent:
+                            last_percent = percent_text
+                            logger.info("[iqiyi] 视频上传中 %s,等待完成...", percent_text)
+                except Exception:
+                    pass
+            else:
+                if saw_upload_card:
+                    logger.info("[iqiyi] 上传区域已消失,视频上传完成")
+                    return
+
+                try:
+                    form_visible = (
+                        await form_ready.count() > 0
+                        and await form_ready.is_visible()
+                    )
+                except Exception:
+                    form_visible = False
+
+                if form_visible:
+                    stable_ready_rounds += 1
+                    if stable_ready_rounds >= 5:
+                        logger.info("[iqiyi] 未检测到上传区域,表单已稳定可见,继续后续流程")
+                        return
+                else:
+                    stable_ready_rounds = 0
+
+            await asyncio.sleep(2)
+
+        raise TimeoutError("[iqiyi] 等待视频上传完成超时(1800s)")
 
     # ------------------------------------------------------------------
     # Form field helpers
@@ -924,6 +984,61 @@ class IqiyiPlatform(BasePlatform):
                         return True
                 except Exception:
                     continue
+
+            error_keywords = ("发布失败", "提交失败", "上传失败", "请先上传")
+            for kw in error_keywords:
+                try:
+                    if await page.get_by_text(kw, exact=False).count() > 0:
+                        logger.warning("[发布] 页面文本命中失败关键词 %r, 当前 URL: %s", kw, page.url)
+                        return False
+                except Exception:
+                    continue
+
+            # 日志里发布后会进入 /wemedia/videoPublish/add/RUGC，不能再直接判失败。
+            if "/wemedia/videopublish/add/rugc" in current_url:
+                logger.info("[iqiyi] 命中已知提交后页面,继续等待最终状态: %s", page.url)
+                settle_deadline = asyncio.get_event_loop().time() + 30
+                hidden_rounds = 0
+                while asyncio.get_event_loop().time() < settle_deadline:
+                    for kw in success_keywords:
+                        try:
+                            if await page.get_by_text(kw, exact=False).count() > 0:
+                                logger.info("页面文本命中成功关键词: %r", kw)
+                                logger.info("[发布] Video published successfully")
+                                return True
+                        except Exception:
+                            continue
+
+                    for kw in error_keywords:
+                        try:
+                            if await page.get_by_text(kw, exact=False).count() > 0:
+                                logger.warning(
+                                    "[发布] 页面文本命中失败关键词 %r, 当前 URL: %s",
+                                    kw, page.url,
+                                )
+                                return False
+                        except Exception:
+                            continue
+
+                    try:
+                        btn_visible = (
+                            await publish_btn.count() > 0
+                            and await publish_btn.is_visible()
+                        )
+                    except Exception:
+                        btn_visible = False
+                    if not btn_visible:
+                        hidden_rounds += 1
+                        if hidden_rounds >= 3:
+                            logger.info("[iqiyi] 提交后页面已无发布按钮,按成功处理")
+                            return True
+                    else:
+                        hidden_rounds = 0
+
+                    await asyncio.sleep(2)
+
+                logger.info("[iqiyi] 已知提交后页面未检测到失败信号,按成功处理: %s", page.url)
+                return True
 
             # 所有判定都不满足 → 视为跳转到了非成功页（如内容管理页）
             logger.warning(
