@@ -17,6 +17,7 @@ from queue import Queue
 from conf import BASE_DIR
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 
 logger = get_channel_logger("bilibili")
 
@@ -584,6 +585,14 @@ class BilibiliPlatform(BasePlatform):
                 for attempt in range(10):
                     try:
                         submit_span = page.locator("span.submit-add")
+                        if attempt == 0 or (attempt + 1) % 5 == 0:
+                            log_event(
+                                logger,
+                                "PUBLISH_GATE",
+                                attempt=attempt + 1,
+                                button_count=await submit_span.count(),
+                                current_url=page.url,
+                            )
                         if await submit_span.count() > 0:
                             await submit_span.first.scroll_into_view_if_needed()
                             await submit_span.first.click()
@@ -622,6 +631,13 @@ class BilibiliPlatform(BasePlatform):
                                 break
 
                         if submitted:
+                            log_event(
+                                logger,
+                                "PUBLISH_RESULT",
+                                attempt=attempt + 1,
+                                result="success",
+                                current_url=page.url,
+                            )
                             break
 
                         logger.info(
@@ -635,6 +651,13 @@ class BilibiliPlatform(BasePlatform):
                             full_page=True,
                         )
                     except Exception as exc:
+                        log_event(
+                            logger,
+                            "PUBLISH_RETRY",
+                            attempt=attempt + 1,
+                            error=str(exc),
+                            current_url=page.url,
+                        )
                         logger.info(
                             f"[上传视频] submit retry {attempt + 1}/10: {exc}"
                         )
@@ -647,6 +670,13 @@ class BilibiliPlatform(BasePlatform):
                         await asyncio.sleep(2)
 
                 if not submitted:
+                    log_event(
+                        logger,
+                        "PUBLISH_RESULT",
+                        attempt=10,
+                        result="unconfirmed",
+                        current_url=page.url,
+                    )
                     logger.info(
                         "[上传视频] could not confirm submission, "
                         "but it may have succeeded"
@@ -714,12 +744,21 @@ class BilibiliPlatform(BasePlatform):
         超时 4 小时,0.5s 轮询。
         """
         logger.info("[上传视频] 等待视频上传完成(最多 4 小时)...")
+        wait_started_at = time.monotonic()
         done_text = page.get_by_text("上传完成", exact=True)
         for i in range(_UPLOAD_WAIT_POLLS):
             try:
                 if await done_text.count() > 0:
                     await asyncio.sleep(2)  # 等稳定
                     elapsed = i * 0.5
+                    log_event(
+                        logger,
+                        "UPLOAD_SUMMARY",
+                        elapsed_s=round(time.monotonic() - wait_started_at, 1),
+                        rounds=i + 1,
+                        ready_reason="done_text_visible",
+                        current_url=page.url,
+                    )
                     logger.info(
                         "[上传视频] 检测到「上传完成」,上传成功 (耗时 %.0f 秒)",
                         elapsed,
@@ -728,6 +767,14 @@ class BilibiliPlatform(BasePlatform):
                 # 检测上传失败
                 fail_text = page.get_by_text("上传失败", exact=True)
                 if await fail_text.count() > 0:
+                    log_event(
+                        logger,
+                        "UPLOAD_SUMMARY",
+                        elapsed_s=round(time.monotonic() - wait_started_at, 1),
+                        rounds=i + 1,
+                        ready_reason="failed_text_visible",
+                        current_url=page.url,
+                    )
                     raise RuntimeError("视频上传失败:检测到「上传失败」文案")
                 if i % 60 == 0 and i > 0:  # 每 30 秒打一次日志
                     logger.info(
@@ -739,6 +786,14 @@ class BilibiliPlatform(BasePlatform):
                 if i % 60 == 0 and i > 0:
                     logger.info("[上传视频] 上传状态检查: %s", exc)
             await asyncio.sleep(0.5)
+        log_event(
+            logger,
+            "UPLOAD_SUMMARY",
+            elapsed_s=round(time.monotonic() - wait_started_at, 1),
+            rounds=_UPLOAD_WAIT_POLLS,
+            ready_reason="timeout",
+            current_url=page.url,
+        )
         raise TimeoutError("视频上传超时(超过 4 小时):未检测到「上传完成」")
 
     @staticmethod
