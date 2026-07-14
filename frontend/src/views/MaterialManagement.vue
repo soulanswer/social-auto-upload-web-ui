@@ -166,10 +166,12 @@
       width="60%"
       :top="'8vh'"
       class="preview-dialog"
+      @close="handlePreviewClose"
+      @closed="onPreviewClosed"
     >
       <div class="preview-container" v-if="currentMaterial">
         <div v-if="currentMaterial.file_type === 'video'" class="video-preview">
-          <video :src="getFullUrl(currentMaterial)" controls autoplay />
+          <video ref="previewVideoRef" :src="getFullUrl(currentMaterial)" controls autoplay />
         </div>
         <div v-else class="image-preview">
           <img :src="getFullUrl(currentMaterial)" :alt="currentMaterial.original_filename" />
@@ -230,6 +232,7 @@ const hasFilter = computed(
 const uploadDialogVisible = ref(false)
 const previewDialogVisible = ref(false)
 const currentMaterial = ref(null)
+const previewVideoRef = ref(null)
 
 function onSearchInput() {
   page.value = 1
@@ -318,6 +321,22 @@ function formatDate(iso) {
 function openPreview(mat) {
   currentMaterial.value = mat
   previewDialogVisible.value = true
+}
+function stopPreviewPlayback() {
+  const videoEl = previewVideoRef.value
+  if (!videoEl) return
+  videoEl.pause()
+  videoEl.currentTime = 0
+}
+
+function handlePreviewClose() {
+  stopPreviewPlayback()
+}
+
+function onPreviewClosed() {
+  stopPreviewPlayback()
+  currentMaterial.value = null
+  previewVideoRef.value = null
 }
 
 // 上传素材
