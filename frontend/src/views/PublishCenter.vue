@@ -1472,6 +1472,83 @@ const publishAccountIds = reactive(new Set())
 
 // ========== Sidebar Methods ==========
 
+function getOrderedSelectedAccounts(selectedIds = publishAccountIds) {
+  const idSet = selectedIds instanceof Set ? selectedIds : new Set(selectedIds)
+  const ordered = []
+  for (const group of accountGroups.value) {
+    for (const account of group.accounts) {
+      if (idSet.has(account.id)) {
+        ordered.push({ account, platformKey: group.key })
+      }
+    }
+  }
+  return ordered
+}
+
+function syncSelectionAfterPublishAccountsChange(options = {}) {
+  const {
+    preferAccountView = false,
+    previousOrderedIds = null,
+    removedAccountId = null,
+  } = options
+  const orderedSelected = getOrderedSelectedAccounts()
+
+  if (orderedSelected.length === 0) {
+    selectedPlatform.value = null
+    selectedAccountId.value = null
+    syncFormFromCurrentSettings()
+    return
+  }
+
+  const currentAccountStillSelected =
+    selectedAccountId.value != null && publishAccountIds.has(selectedAccountId.value)
+  if (currentAccountStillSelected) {
+    const currentAccount = accountStore.accounts.find(a => a.id === selectedAccountId.value)
+    const currentPlatformKey = currentAccount ? platformNameToKey[currentAccount.platform] : null
+    if (currentPlatformKey) {
+      selectedPlatform.value = currentPlatformKey
+      expandedGroups.value.add(currentPlatformKey)
+    }
+    syncFormFromCurrentSettings()
+    return
+  }
+
+  if (preferAccountView) {
+    let nextEntry = null
+    const anchorId = removedAccountId ?? selectedAccountId.value
+    if (Array.isArray(previousOrderedIds) && anchorId != null) {
+      const removedIndex = previousOrderedIds.indexOf(anchorId)
+      if (removedIndex >= 0) {
+        const targetIndex = Math.min(removedIndex, orderedSelected.length - 1)
+        nextEntry = orderedSelected[targetIndex]
+      }
+    }
+    if (!nextEntry) {
+      nextEntry = orderedSelected[0]
+    }
+    selectedPlatform.value = nextEntry.platformKey
+    selectedAccountId.value = nextEntry.account.id
+    expandedGroups.value.add(nextEntry.platformKey)
+    syncFormFromCurrentSettings()
+    return
+  }
+
+  const currentPlatformHasSelected = selectedPlatform.value
+    ? orderedSelected.some(item => item.platformKey === selectedPlatform.value)
+    : false
+  if (currentPlatformHasSelected) {
+    selectedAccountId.value = null
+    syncFormFromCurrentSettings()
+    return
+  }
+
+  const nextEntry = orderedSelected[0]
+  selectedPlatform.value = nextEntry.platformKey
+  selectedAccountId.value = null
+  expandedGroups.value.add(nextEntry.platformKey)
+  syncFormFromCurrentSettings()
+}
+
 function toggleGroup(key) {
   if (expandedGroups.value.has(key)) {
     expandedGroups.value.delete(key)
@@ -1483,7 +1560,14 @@ function toggleGroup(key) {
 }
 
 function removePublishAccount(id) {
+  const previousOrderedIds = getOrderedSelectedAccounts().map(item => item.account.id)
+  const removingCurrentAccount = selectedAccountId.value === id
   publishAccountIds.delete(id)
+  syncSelectionAfterPublishAccountsChange({
+    preferAccountView: removingCurrentAccount,
+    previousOrderedIds,
+    removedAccountId: id,
+  })
   hasChanges.value = true
 }
 
@@ -1496,10 +1580,12 @@ function selectAccount(account, group) {
 // ========== Account Dialog ==========
 
 function onAccountConfirm(ids) {
+  const hadAccountView = selectedAccountId.value != null
   publishAccountIds.clear()
   ids.forEach(id => {
     publishAccountIds.add(id)
   })
+  syncSelectionAfterPublishAccountsChange({ preferAccountView: hadAccountView })
   hasChanges.value = true
   ElMessage.success(`已选择 ${ids.length} 个账号`)
 }
@@ -1812,6 +1898,9 @@ async function restoreDraft(draftId) {
     if (dd.selectedAccountId) {
       selectedAccountId.value = dd.selectedAccountId
     }
+    syncSelectionAfterPublishAccountsChange({
+      preferAccountView: selectedAccountId.value != null,
+    })
 
     // 旧草稿兼容:清除残留的 videoFormat(videoModeTab 已废弃,由视频方向自动推导)
     if (dd.platformConfigs) {
