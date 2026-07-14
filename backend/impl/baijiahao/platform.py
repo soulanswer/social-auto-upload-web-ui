@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 import threading
 from pathlib import Path
 from queue import Queue
@@ -519,11 +520,23 @@ class BaijiahaoPlatform(BasePlatform):
                 try:
                     await page.wait_for_url(
                         "https://baijiahao.baidu.com/builder/rc/clue**",
-                        timeout=30000,
+                        timeout=60000,
+                    )
+                    log_event(
+                        logger,
+                        "PUBLISH_RESULT",
+                        result="url_success",
+                        current_url=page.url,
                     )
                     logger.info("[发布] 视频发布成功! 页面跳转到: %s", page.url)
                 except Exception:
                     current_url = page.url
+                    log_event(
+                        logger,
+                        "PUBLISH_RESULT",
+                        result="url_timeout",
+                        current_url=current_url,
+                    )
                     logger.error(
                         "[发布] 发布后未跳转到成功页面, 当前URL: %s",
                         current_url,
@@ -604,7 +617,15 @@ class BaijiahaoPlatform(BasePlatform):
 
         Returns True on success, False on failure.
         """
+        started_at = time.monotonic()
         await upload_done.wait()
+        log_event(
+            logger,
+            "UPLOAD_SUMMARY",
+            elapsed_s=round(time.monotonic() - started_at, 1),
+            ready_reason="compuploadvideo_request",
+            current_url=page.url,
+        )
         logger.info("[上传视频] 视频上传完毕（检测到 compuploadvideo 请求）")
         return True
 
@@ -682,11 +703,25 @@ class BaijiahaoPlatform(BasePlatform):
             publish_button = page.locator(
                 "button[data-testid='publish-btn']"
             )
+            log_event(
+                logger,
+                "PUBLISH_GATE",
+                mode="direct",
+                primary_button_count=await publish_button.count(),
+                current_url=page.url,
+            )
             if await publish_button.count():
                 await publish_button.click()
             else:
                 publish_button = page.locator(
                     "button.cheetah-btn-primary:has-text('发布')"
+                )
+                log_event(
+                    logger,
+                    "PUBLISH_GATE",
+                    mode="direct-fallback",
+                    fallback_button_count=await publish_button.count(),
+                    current_url=page.url,
                 )
                 if await publish_button.count():
                     await publish_button.first.click()
