@@ -12,10 +12,12 @@ import threading
 import time
 from pathlib import Path
 from queue import Queue
+from urllib.parse import urljoin
 
 from conf import BASE_DIR
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 
 logger = get_channel_logger("channels")
 
@@ -68,39 +70,128 @@ def _format_short_title(origin_title: str) -> str:
 async def _extract_qrcode_src(page) -> str:
     """Extract the QR code image ``src`` from the Channels login page.
 
-    The QR code lives inside an iframe (``login-for-iframe``) on the
-    Channels login page.  Falls back to top-level selectors when the
-    iframe is unavailable.
+    The QR code currently lives inside the ``#wx-oauth-container`` iframe
+    served by ``open.weixin.qq.com/connect/qrconnect``. Fall back to the
+    legacy iframe selector and then to top-level selectors when needed.
     """
-    # Primary: iframe approach
-    try:
-        iframe_locator = page.frame_locator('[src*="login-for-iframe"]')
-        qr_code_img = iframe_locator.locator("div#app img.qrcode").first
-        await qr_code_img.wait_for(state="visible", timeout=30000)
-        src = await qr_code_img.get_attribute("src")
-        if src and src.startswith("data:image/"):
-            return src
-    except Exception:
-        pass
-
-    # Fallback: top-level selectors
-    for selector in (
-        "div.login-qrcode-wrap img.qrcode",
-        "div.qrcode-wrap img.qrcode",
+    # Primary: current iframe structure on channels login page
+    iframe_selectors = (
+        "#wx-oauth-container iframe",
+        'iframe[src*="open.weixin.qq.com/connect/qrconnect"]',
+        'iframe[src*="login-for-iframe"]',
+    )
+    qr_img_selectors = (
+        "img.js_qrcode_img",
+        "img.web_qrcode_img",
         "img.qrcode",
+        'img[src*="/connect/qrcode/"]',
         'img[src^="data:image/"]',
-    ):
-        qr_code_img = page.locator(selector).first
-        try:
-            if not await qr_code_img.count() or not await qr_code_img.is_visible():
+    )
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        for iframe_selector in iframe_selectors:
+            try:
+                if not await page.locator(iframe_selector).count():
+                    continue
+                iframe_locator = page.frame_locator(iframe_selector)
+                for img_selector in qr_img_selectors:
+                    qr_code_img = iframe_locator.locator(img_selector).first
+                    try:
+                        if not await qr_code_img.count():
+                            continue
+                        src = await qr_code_img.get_attribute("src")
+                        if src and src.startswith("/"):
+                            src = urljoin("https://open.weixin.qq.com", src)
+                        if src and (
+                            src.startswith("data:image/")
+                            or src.startswith("http://")
+                            or src.startswith("https://")
+                        ):
+                            return src
+                    except Exception:
+                        continue
+            except Exception:
                 continue
-            src = await qr_code_img.get_attribute("src")
-            if src and src.startswith("data:image/"):
-                return src
-        except Exception:
-            continue
+
+        # Fallback: top-level selectors
+        for selector in (
+            "#wx-oauth-container img",
+            "div.login-qrcode-wrap img.qrcode",
+            "div.qrcode-wrap img.qrcode",
+            "img.qrcode",
+            'img[src*="/connect/qrcode/"]',
+            'img[src^="data:image/"]',
+        ):
+            qr_code_img = page.locator(selector).first
+            try:
+                if not await qr_code_img.count():
+                    continue
+                src = await qr_code_img.get_attribute("src")
+                if src and src.startswith("/"):
+                    src = urljoin("https://open.weixin.qq.com", src)
+                if src and (
+                    src.startswith("data:image/")
+                    or src.startswith("http://")
+                    or src.startswith("https://")
+                ):
+                    return src
+            except Exception:
+                continue
+
+        await asyncio.sleep(1)
 
     raise RuntimeError("未获取到视频号登录二维码地址")
+
+
+async def _render_qrcode_fallback(page, qrcode_src: str) -> None:
+    """Render a stable QR image above the broken iframe renderer.
+
+    The Channels login page sometimes keeps the WeChat iframe QR code
+    hidden behind a bogus "加载失败，点击重试" state in headful mode even
+    though the QR image URL is already valid. Keep the iframe alive for
+    the real login callback, but paint the QR image ourselves so the user
+    can still scan it.
+    """
+    await page.evaluate(
+        """(src) => {
+            const wrap = document.querySelector('div.login-qrcode-wrap div.qrcode-wrap');
+            if (!wrap) return;
+
+            wrap.style.position = 'relative';
+
+            let overlay = wrap.querySelector('#sau-qrcode-fallback');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'sau-qrcode-fallback';
+                overlay.style.position = 'absolute';
+                overlay.style.inset = '0';
+                overlay.style.display = 'flex';
+                overlay.style.alignItems = 'center';
+                overlay.style.justifyContent = 'center';
+                overlay.style.zIndex = '999';
+                overlay.style.pointerEvents = 'none';
+                overlay.style.background = 'transparent';
+
+                const img = document.createElement('img');
+                img.id = 'sau-qrcode-fallback-img';
+                img.style.width = '208px';
+                img.style.height = '208px';
+                img.style.objectFit = 'contain';
+                img.style.display = 'block';
+                img.style.background = '#fff';
+                img.style.borderRadius = '4px';
+                overlay.appendChild(img);
+                wrap.appendChild(overlay);
+            }
+
+            const img = overlay.querySelector('#sau-qrcode-fallback-img');
+            if (img) {
+                img.src = src;
+            }
+        }""",
+        qrcode_src,
+    )
 
 
 async def _is_qrcode_expired(page) -> bool:
@@ -108,6 +199,8 @@ async def _is_qrcode_expired(page) -> bool:
     for selector in (
         'div.mask.show p.refresh-tip:has-text("二维码已过期，点击刷新")',
         'div.mask.show p.refresh-tip:has-text("网络不可用，点击刷新")',
+        'div.mask p.refresh-tip:has-text("二维码已过期，点击刷新")',
+        'div.mask p.refresh-tip:has-text("网络不可用，点击刷新")',
         'p.refresh-tip:has-text("二维码已过期，点击刷新")',
         'p.refresh-tip:has-text("网络不可用，点击刷新")',
     ):
@@ -139,8 +232,12 @@ async def _refresh_qrcode(page) -> None:
     """Click the refresh area to regenerate an expired QR code."""
     # Try visible refresh-wrap first
     for selector in (
+        "div.login-qrcode-wrap div.mask div.refresh-wrap",
         "div.login-qrcode-wrap div.mask.show div.refresh-wrap",
+        "div.login-qrcode-wrap div.mask .refresh-wrap",
         "div.login-qrcode-wrap div.mask.show .refresh-wrap",
+        "div.qrcode-wrap div.mask div.refresh-wrap",
+        "div.qrcode-wrap div.mask .refresh-wrap",
     ):
         refresh_wrap = page.locator(selector).first
         try:
@@ -153,8 +250,12 @@ async def _refresh_qrcode(page) -> None:
 
     # Try tip-based refresh
     for selector in (
+        'div.mask p.refresh-tip:has-text("加载失败，点击重试")',
         'div.mask.show p.refresh-tip:has-text("二维码已过期，点击刷新")',
         'div.mask.show p.refresh-tip:has-text("网络不可用，点击刷新")',
+        'div.mask p.refresh-tip:has-text("二维码已过期，点击刷新")',
+        'div.mask p.refresh-tip:has-text("网络不可用，点击刷新")',
+        'p.refresh-tip:has-text("加载失败，点击重试")',
         'p.refresh-tip:has-text("二维码已过期，点击刷新")',
         'p.refresh-tip:has-text("网络不可用，点击刷新")',
     ):
@@ -174,7 +275,7 @@ async def _refresh_qrcode(page) -> None:
             continue
 
     # Final fallback
-    fallback = page.locator("div.login-qrcode-wrap div.refresh-wrap").first
+    fallback = page.locator("div.login-qrcode-wrap div.refresh-wrap, div.qrcode-wrap div.refresh-wrap").first
     if await fallback.count():
         await fallback.click()
         return
@@ -441,11 +542,22 @@ async def _wait_for_upload_complete(page, file_path: str) -> None:
     If an upload error is detected, the failed file is deleted and
     re-uploaded automatically.
     """
+    retry_count = 0
+    started_at = time.monotonic()
     while True:
         try:
             publish_button = page.get_by_role("button", name="发表")
             button_class = await publish_button.get_attribute("class")
             if button_class and "weui-desktop-btn_disabled" not in button_class:
+                log_event(
+                    logger,
+                    "UPLOAD_SUMMARY",
+                    elapsed_s=round(time.monotonic() - started_at, 1),
+                    ready_reason="publish_button_enabled",
+                    retry_count=retry_count,
+                    current_url=page.url,
+                    file_path=file_path,
+                )
                 logger.info("[上传视频] video upload complete")
                 break
 
@@ -459,6 +571,14 @@ async def _wait_for_upload_complete(page, file_path: str) -> None:
             ).count()
             if upload_failed and delete_button:
                 logger.info("[上传视频] upload error detected, retrying")
+                retry_count += 1
+                log_event(
+                    logger,
+                    "UPLOAD_RETRY",
+                    retry_count=retry_count,
+                    current_url=page.url,
+                    file_path=file_path,
+                )
                 await page.locator(
                     'div.media-status-content div.tag-inner:has-text("删除")'
                 ).click()
@@ -807,7 +927,9 @@ async def _dismiss_i_know_dialog(page) -> bool:
 
 async def _submit_publish(page, is_draft: bool = False) -> None:
     """Click the publish (or save-draft) button and wait for navigation."""
+    attempt = 0
     while True:
+        attempt += 1
         try:
             if is_draft:
                 draft_button = page.locator(
@@ -815,12 +937,20 @@ async def _submit_publish(page, is_draft: bool = False) -> None:
                 )
                 if await draft_button.count():
                     await draft_button.click()
-                await page.wait_for_url("**/post/list**", timeout=30000)
+                await page.wait_for_url("**/post/list**", timeout=60000)
                 logger.info("[发布] draft saved successfully")
             else:
                 publish_button = page.locator(
                     'div.form-btns button:has-text("发表")'
                 )
+                if attempt == 1 or attempt % 5 == 0:
+                    log_event(
+                        logger,
+                        "PUBLISH_GATE",
+                        attempt=attempt,
+                        button_count=await publish_button.count(),
+                        current_url=page.url,
+                    )
                 if await publish_button.count():
                     await publish_button.click()
                     # 视频号偶尔弹出「我知道了」提醒框,先关掉再等跳转
@@ -831,10 +961,18 @@ async def _submit_publish(page, is_draft: bool = False) -> None:
                         )
                         if await publish_button.count():
                             await publish_button.click()
-                await page.wait_for_url(TENCENT_MANAGE_URL, timeout=30000)
+                await page.wait_for_url(TENCENT_MANAGE_URL, timeout=60000)
+                log_event(logger, "PUBLISH_RESULT", attempt=attempt, result="success", current_url=page.url)
                 logger.info("[发布] video published successfully")
             break
         except Exception as exc:
+            log_event(
+                logger,
+                "PUBLISH_RETRY",
+                attempt=attempt,
+                error=str(exc),
+                current_url=page.url,
+            )
             current_url = page.url
             if is_draft:
                 if "post/list" in current_url or "draft" in current_url:
@@ -897,6 +1035,7 @@ class ChannelsPlatform(BasePlatform):
 
             # Extract QR code and push to frontend
             qrcode_src = await _extract_qrcode_src(page)
+            await _render_qrcode_fallback(page, qrcode_src)
             status_queue.put(json.dumps({
                 "status": "qrcode",
                 "qrcode": qrcode_src,
@@ -932,6 +1071,7 @@ class ChannelsPlatform(BasePlatform):
                     await asyncio.sleep(1)
                     try:
                         qrcode_src = await _extract_qrcode_src(page)
+                        await _render_qrcode_fallback(page, qrcode_src)
                         status_queue.put(json.dumps({
                             "status": "qrcode",
                             "qrcode": qrcode_src,
@@ -943,8 +1083,8 @@ class ChannelsPlatform(BasePlatform):
         except Exception as exc:
             logger.info(f"[发布] login error: {exc}")
             status_queue.put(json.dumps({
-                "status": "failed",
-                "message": str(exc),
+                "status": "error",
+                "msg": str(exc),
             }))
         finally:
             try:
