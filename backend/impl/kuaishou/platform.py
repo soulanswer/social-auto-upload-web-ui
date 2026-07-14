@@ -14,6 +14,7 @@ from queue import Queue
 from conf import BASE_DIR
 
 from util._logger import bind_account_name, get_channel_logger
+from util.publish_debug import log_event
 logger = get_channel_logger("kuaishou")
 
 from .._browser import create_browser_sync, create_context_sync
@@ -672,15 +673,36 @@ class KuaishouPlatform(BasePlatform):
 
             # ------ Wait for upload to complete (no timeout — wait indefinitely) ------
             retry = 0
+            upload_started_at = time.monotonic()
+            upload_retry_count = 0
             while True:
                 try:
                     if await page.locator("text=上传中").count() == 0:
+                        log_event(
+                            logger,
+                            "UPLOAD_SUMMARY",
+                            elapsed_s=round(time.monotonic() - upload_started_at, 1),
+                            ready_reason="uploading_text_gone",
+                            retry_rounds=retry,
+                            retry_count=upload_retry_count,
+                            current_url=page.url,
+                            file_path=video_path,
+                        )
                         logger.info("[上传视频] 视频上传成功!")
                         break
                     if retry % 15 == 0:
                         logger.info("[上传视频] 仍在上传中... (第 %d 次重试)", retry)
                     if await page.locator("text=上传失败").count():
                         logger.info("[上传视频] 上传失败，正在重试...")
+                        upload_retry_count += 1
+                        log_event(
+                            logger,
+                            "UPLOAD_RETRY",
+                            retry_rounds=retry,
+                            retry_count=upload_retry_count,
+                            current_url=page.url,
+                            file_path=video_path,
+                        )
                         await page.locator(
                             'div.progress-div [class^="upload-btn-input"]'
                         ).set_input_files(video_path)
@@ -713,9 +735,19 @@ class KuaishouPlatform(BasePlatform):
 
             # ------ Click publish ------
             logger.info("[发布] 正在点击发布按钮...")
+            publish_attempt = 0
             while True:
+                publish_attempt += 1
                 try:
                     publish_btn = page.get_by_text("发布", exact=True)
+                    if publish_attempt == 1 or publish_attempt % 5 == 0:
+                        log_event(
+                            logger,
+                            "PUBLISH_GATE",
+                            attempt=publish_attempt,
+                            button_count=await publish_btn.count(),
+                            current_url=page.url,
+                        )
                     if await publish_btn.count() > 0:
                         await publish_btn.click()
 
@@ -724,10 +756,24 @@ class KuaishouPlatform(BasePlatform):
                     if await confirm_btn.count() > 0:
                         await confirm_btn.click()
 
-                    await page.wait_for_url(_KS_MANAGE_URL_PATTERN, timeout=5000)
+                    await page.wait_for_url(_KS_MANAGE_URL_PATTERN, timeout=60000)
+                    log_event(
+                        logger,
+                        "PUBLISH_RESULT",
+                        attempt=publish_attempt,
+                        result="success",
+                        current_url=page.url,
+                    )
                     logger.info("[发布] 视频发布成功! 页面跳转到: %s", page.url)
                     break
                 except Exception as exc:
+                    log_event(
+                        logger,
+                        "PUBLISH_RETRY",
+                        attempt=publish_attempt,
+                        error=str(exc),
+                        current_url=page.url,
+                    )
                     logger.info("[发布] 发布重试: %s", exc)
                     await asyncio.sleep(1)
 
