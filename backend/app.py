@@ -35,6 +35,7 @@ from conf import (
     FEEDBACK_API_TIMEOUT,
 )
 from util._logger import get_channel_logger
+from util.publish_debug import log_event
 
 logger = get_channel_logger("backend")
 
@@ -894,11 +895,26 @@ def postVideo():
         logger.info(f"发布简介校验失败: {err}")
         return jsonify({"code": 400, "msg": err}), 400
 
+    api_debug = {
+        "batch_id": data.get("batchId", ""),
+        "platform_type": data.get("type"),
+        "platform_key": platform.platform_key,
+        "title": data.get("title", ""),
+        "account_count": len(data.get("accountList", []) or []),
+        "file_count": len(data.get("fileList", []) or []),
+        "tag_count": len(data.get("tags", []) or []),
+        "enable_timer": data.get("enableTimer"),
+        "schedule_time": data.get("scheduleTime", ""),
+    }
+
     try:
         # Resolve file paths through storage abstraction
         file_list = [_resolve_material_path(f) for f in data.get('fileList', [])]
         thumbnail_landscape = _resolve_material_path(data.get('thumbnailLandscape', ''))
         thumbnail_portrait = _resolve_material_path(data.get('thumbnailPortrait', ''))
+        api_debug["resolved_files"] = file_list
+        api_debug["thumbnail_landscape"] = thumbnail_landscape
+        api_debug["thumbnail_portrait"] = thumbnail_portrait
 
         # 兜底：只上传了横版或竖版之一时，另一个用同图（保证 2 个封面都有内容）
         if thumbnail_landscape and not thumbnail_portrait:
@@ -925,6 +941,12 @@ def postVideo():
         tag_value = data.get('tag_value', '')
         mini_link = data.get('mini_link', '')
         mix_id = data.get('mix_id', '')
+        api_debug["activities_count"] = len(activities or [])
+        api_debug["hotspot"] = hotspot
+        api_debug["tag_type"] = tag_type
+        api_debug["tag_value"] = tag_value
+        api_debug["mix_id"] = mix_id
+        log_event(logger, "API_PUBLISH_REQUEST", **api_debug)
 
         publish_fn = platform.publish_video
         if asyncio.iscoroutinefunction(publish_fn):
@@ -1050,10 +1072,20 @@ def postVideo():
                 recommend=data.get('recommend', False),
             )
         if result:
+            log_event(logger, "API_PUBLISH_RESULT", **api_debug, result=True)
             return jsonify({"code": 200, "msg": "发布任务已提交", "data": None}), 200
         else:
+            log_event(
+                logger,
+                "API_PUBLISH_RESULT",
+                **api_debug,
+                result=False,
+                reason="platform_returned_false",
+            )
             return jsonify({"code": 500, "msg": "发布失败：页面未跳转，表单校验未通过", "data": None}), 500
     except Exception as e:
+        log_event(logger, "API_PUBLISH_EXCEPTION", **api_debug, error=str(e))
+        logger.exception("[API_PUBLISH_EXCEPTION_STACK] publish failed")
         logger.info(f"发布视频时出错: {str(e)}")
         return jsonify({"code": 500, "msg": f"发布失败: {str(e)}", "data": None}), 500
 
