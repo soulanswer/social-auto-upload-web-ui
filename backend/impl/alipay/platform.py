@@ -245,6 +245,16 @@ class AlipayPlatform(BasePlatform):
                 final_url = page.url
                 # 仍停留在生活号首页(没被重定向) → cookie 有效
                 valid = "c.alipay.com/page/life-account/index" in final_url
+                if valid:
+                    try:
+                        await context.storage_state(path=cookie_path)
+                        logger.info(
+                            f"[alipay] check_cookie 已回写 storage_state: {cookie_path}"
+                        )
+                    except Exception as write_exc:
+                        logger.info(
+                            f"[alipay] check_cookie 回写 storage_state 失败: {write_exc}"
+                        )
                 logger.info(
                     f"[alipay] cookie {'有效' if valid else '失效,需重新登录'} "
                     f"(final_url={final_url})"
@@ -269,6 +279,7 @@ class AlipayPlatform(BasePlatform):
 
         def _launch():
             browser = create_browser_sync(headless=False)
+            context = None
             try:
                 context = create_context_sync(browser, storage_state=cookie_path)
                 page = context.new_page()
@@ -278,6 +289,16 @@ class AlipayPlatform(BasePlatform):
                 except Exception:
                     pass
             finally:
+                if context is not None:
+                    try:
+                        context.storage_state(path=cookie_path)
+                        logger.info(
+                            f"[alipay] open_creator_center 已回写 storage_state: {cookie_path}"
+                        )
+                    except Exception as write_exc:
+                        logger.info(
+                            f"[alipay] open_creator_center 回写 storage_state 失败: {write_exc}"
+                        )
                 try:
                     browser.close()
                 except Exception:
@@ -301,7 +322,17 @@ class AlipayPlatform(BasePlatform):
             page = await context.new_page()
             try:
                 await page.goto(url, wait_until="networkidle", timeout=30000)
-                return await scrape_alipay_profile(page)
+                name, avatar = await scrape_alipay_profile(page)
+                try:
+                    await context.storage_state(path=cookie_path)
+                    logger.info(
+                        f"[alipay] sync_profile 已回写 storage_state: {cookie_path}"
+                    )
+                except Exception as write_exc:
+                    logger.info(
+                        f"[alipay] sync_profile 回写 storage_state 失败: {write_exc}"
+                    )
+                return name, avatar
             except Exception as e:
                 logger.info(f"[alipay] 同步资料失败: {e}")
                 return "", ""
