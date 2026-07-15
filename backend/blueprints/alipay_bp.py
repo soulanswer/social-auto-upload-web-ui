@@ -51,6 +51,14 @@ def _get_cookie_path(cookie_file: str) -> str:
     return str(Path(BASE_DIR / "cookiesFile" / cookie_file))
 
 
+async def _persist_storage_state(context, cookie_path: str, scene: str) -> None:
+    try:
+        await context.storage_state(path=cookie_path)
+        logger.info(f"[{scene}] 已回写 storage_state: {cookie_path}")
+    except Exception as e:
+        logger.info(f"[{scene}] 回写 storage_state 失败: {e}")
+
+
 def _get_account_cookie_file(account_id: str) -> str:
     """从数据库取账号 cookie 文件名。account_id 为空时取任意一个支付宝账号。"""
     conn = sqlite3.connect(str(Path(BASE_DIR / "db" / "database.db")))
@@ -239,6 +247,7 @@ async def _search_compilation_via_browser(cookie_file: str, keyword: str) -> dic
                     "total": raw.get("total", 0),
                 })
 
+            await _persist_storage_state(context, cookie_path, "合集搜索")
             return {
                 "success": True,
                 "data": {
@@ -501,6 +510,7 @@ async def _fetch_music_list_via_browser(cookie_file: str) -> dict:
                     "data": {"raw_sample": str(captured_response)[:500]},
                 }
 
+            await _persist_storage_state(context, cookie_path, "音乐列表")
             return {
                 "success": True,
                 "data": {
