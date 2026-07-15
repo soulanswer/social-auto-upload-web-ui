@@ -53,6 +53,10 @@
         <el-icon><CollectionTag /></el-icon>
         批量设置标签
       </el-button>
+      <el-button class="persistent-cache-btn" @click="persistentCacheDialogVisible = true">
+        <el-icon><FolderOpened /></el-icon>
+        持久化缓存
+      </el-button>
     </div>
 
     <!-- 标签筛选 -->
@@ -228,6 +232,10 @@
     <BatchTagDialog
       v-model="batchTagDialogVisible"
       @done="onBatchTagDone"
+    />
+
+    <BatchPersistentCacheDialog
+      v-model="persistentCacheDialogVisible"
     />
 
     <!-- 批量检查对话框（复用发布前检查的 4 阶段进度 + 失效自动重登） -->
@@ -427,7 +435,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { Refresh, Loading, Link, Plus, Edit, Delete, Check, Folder, Key, CollectionTag, Close, Upload, SuccessFilled, CircleCheckFilled, CircleCloseFilled, Position, InfoFilled, Select, Search } from '@element-plus/icons-vue'
+import { Refresh, Loading, Link, Plus, Edit, Delete, Check, Folder, FolderOpened, Key, CollectionTag, Close, Upload, SuccessFilled, CircleCheckFilled, CircleCloseFilled, Position, InfoFilled, Select, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { accountApi } from '@/api/account'
 import { useAccountStore } from '@/stores/account'
@@ -439,6 +447,7 @@ import LoginDialog from '@/components/LoginDialog.vue'
 import TagPopover from '@/components/TagPopover.vue'
 import PrePublishCheckDialog from '@/components/PrePublishCheckDialog.vue'
 import BatchTagDialog from '@/components/BatchTagDialog.vue'
+import BatchPersistentCacheDialog from '@/components/BatchPersistentCacheDialog.vue'
 
 const accountStore = useAccountStore()
 const appStore = useAppStore()
@@ -1020,6 +1029,7 @@ const onLoginFail = ({ platform, errMsg }) => {
 
 // 批量设置标签
 const batchTagDialogVisible = ref(false)
+const persistentCacheDialogVisible = ref(false)
 const onBatchTagDone = async () => {
   await accountStore.loadTags()
   await fetchAccountsQuick()
@@ -1195,7 +1205,7 @@ const submitAccountForm = () => {
       }
     }
 
-    .refresh-btn, .check-all-btn, .batch-tag-btn {
+    .refresh-btn, .check-all-btn, .batch-tag-btn, .persistent-cache-btn {
       background: $bg-surface;
       border: 1px solid $border;
       border-radius: 10px;
