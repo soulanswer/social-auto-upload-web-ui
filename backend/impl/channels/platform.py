@@ -1146,6 +1146,17 @@ class ChannelsPlatform(BasePlatform):
                     return False
 
                 # 如果页面停留(没有重定向到登录页),说明 cookie 有效
+                try:
+                    await context.storage_state(path=cookie_path)
+                    logger.info(
+                        "check_cookie: 已回写最新 storage_state: %s",
+                        cookie_path,
+                    )
+                except Exception as write_exc:
+                    logger.info(
+                        "check_cookie: 回写 storage_state 失败: %s",
+                        write_exc,
+                    )
                 logger.info("check_cookie: [SUCCESS] 页面停留未重定向，Cookie 有效 | URL: %s", final_url)
                 return True
             except Exception as exc:
@@ -1179,6 +1190,11 @@ class ChannelsPlatform(BasePlatform):
             page = await context.new_page()
             await page.goto(TENCENT_UPLOAD_URL)
             name, avatar = await scrape_tencent_profile(page)
+            try:
+                await context.storage_state(path=cookie_path)
+                logger.info("[发布] sync_profile 已回写 storage_state: %s", cookie_path)
+            except Exception as write_exc:
+                logger.info("[发布] sync_profile 回写 storage_state 失败: %s", write_exc)
             await page.close()
             await context.close()
             return name, avatar
@@ -1202,6 +1218,7 @@ class ChannelsPlatform(BasePlatform):
 
         def _launch():
             browser = create_browser_sync(headless=False)
+            context = None
             try:
                 context = create_context_sync(browser, storage_state=cookie_path)
                 page = context.new_page()
@@ -1211,6 +1228,18 @@ class ChannelsPlatform(BasePlatform):
                 except Exception:
                     pass
             finally:
+                if context is not None:
+                    try:
+                        context.storage_state(path=cookie_path)
+                        logger.info(
+                            "[发布] open_creator_center 已回写 storage_state: %s",
+                            cookie_path,
+                        )
+                    except Exception as write_exc:
+                        logger.info(
+                            "[发布] open_creator_center 回写 storage_state 失败: %s",
+                            write_exc,
+                        )
                 try:
                     browser.close()
                 except Exception:
