@@ -73,6 +73,119 @@ async def _scrape_tencent_video_profile(page) -> tuple[str, str]:
     return name, avatar
 
 
+async def _dismiss_unbound_account_dialog(page, timeout_ms: int = 5000) -> bool:
+    """Dismiss the publish-time unbound account warning if it appears."""
+    selectors = (
+        'div[role="dialog"]:has-text("温馨提示"):has-text("未绑定QQ或微信")',
+        'div.ReactModal__Content:has-text("温馨提示"):has-text("未绑定QQ或微信")',
+    )
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    poll_round = 0
+    logger.info(
+        "[发布弹窗] 开始轮询未绑定账号提示弹窗: timeout_ms=%s selectors=%s",
+        timeout_ms,
+        len(selectors),
+    )
+    while time.monotonic() < deadline:
+        poll_round += 1
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        logger.info(
+            "[发布弹窗] 第 %s 轮检查开始: remaining_ms=%s",
+            poll_round,
+            remaining_ms,
+        )
+        for sel in selectors:
+            dialog = page.locator(sel).first
+            try:
+                count = await dialog.count()
+                logger.info(
+                    "[发布弹窗] 第 %s 轮检查选择器: selector=%s count=%s",
+                    poll_round,
+                    sel,
+                    count,
+                )
+                if count == 0:
+                    logger.info(
+                        "[发布弹窗] 第 %s 轮未命中弹窗: selector=%s",
+                        poll_round,
+                        sel,
+                    )
+                    continue
+
+                visible = await dialog.is_visible()
+                logger.info(
+                    "[发布弹窗] 第 %s 轮命中弹窗候选: selector=%s visible=%s",
+                    poll_round,
+                    sel,
+                    visible,
+                )
+                if not visible:
+                    continue
+
+                know_btn = dialog.get_by_role("button", name="我知道了", exact=True).first
+                know_btn_count = await know_btn.count()
+                logger.info(
+                    "[发布弹窗] 第 %s 轮主按钮定位结果: count=%s",
+                    poll_round,
+                    know_btn_count,
+                )
+                if know_btn_count == 0:
+                    logger.info(
+                        "[发布弹窗] 第 %s 轮回退到文本按钮定位",
+                        poll_round,
+                    )
+                    know_btn = dialog.locator('button:has-text("我知道了")').first
+                fallback_count = await know_btn.count()
+                logger.info(
+                    "[发布弹窗] 第 %s 轮最终按钮数量: count=%s",
+                    poll_round,
+                    fallback_count,
+                )
+                await know_btn.wait_for(state="visible", timeout=1000)
+                logger.info(
+                    "[发布弹窗] 第 %s 轮按钮已可见，准备点击",
+                    poll_round,
+                )
+                await know_btn.click()
+                logger.info(
+                    "[发布弹窗] 第 %s 轮已点击“我知道了”，等待弹窗消失",
+                    poll_round,
+                )
+                try:
+                    await dialog.wait_for(state="hidden", timeout=3000)
+                    logger.info(
+                        "[发布弹窗] 第 %s 轮弹窗已消失",
+                        poll_round,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[发布弹窗] 第 %s 轮点击后未在 3000ms 内确认弹窗消失，继续等待 500ms",
+                        poll_round,
+                    )
+                    await asyncio.sleep(0.5)
+                logger.info("[发布] 检测到未绑定账号提示弹窗，已点击“我知道了”关闭")
+                return True
+            except Exception as e:
+                logger.warning(
+                    "[发布弹窗] 第 %s 轮处理选择器异常: selector=%s error=%s",
+                    poll_round,
+                    sel,
+                    e,
+                )
+                continue
+        logger.info(
+            "[发布弹窗] 第 %s 轮未检测到可关闭弹窗，200ms 后继续轮询",
+            poll_round,
+        )
+        await asyncio.sleep(0.2)
+    logger.info(
+        "[发布弹窗] 轮询结束: timeout_ms=%s rounds=%s result=not_found",
+        timeout_ms,
+        poll_round,
+    )
+    return False
+
+
 class TencentVideoPlatform(BasePlatform):
     platform_id = 9
     platform_key = "tencent_video"
@@ -349,6 +462,8 @@ class TencentVideoPlatform(BasePlatform):
                 page = await context.new_page()
                 await page.goto(_PUBLISH_URL)
                 await page.wait_for_load_state("networkidle")
+                logger.info("[上传视频] Publish page loaded, start polling page-entry unbound-account dialog")
+                await _dismiss_unbound_account_dialog(page, timeout_ms=5000)
 
                 # 注册上传完成请求监听器（必须在 set_input_files 之前注册）
                 upload_done = asyncio.Event()
@@ -578,71 +693,325 @@ class TencentVideoPlatform(BasePlatform):
         """Enable scheduled publishing and set the date/time."""
         logger.info("[定时发布] Setting schedule time: %s", publish_date)
         try:
-            # Find the toggle switch - check if already enabled
-            switch = page.locator('button[role="switch"]').first
-            if await switch.count() > 0:
-                is_checked = await switch.get_attribute("aria-checked")
-                if is_checked != "true":
-                    await switch.click()
-                    logger.info("[定时发布] Scheduled publish toggled ON")
-                    await asyncio.sleep(1)
+            schedule_field = page.locator(
+                'xpath=//div[contains(@class, "fieldItemWrapper")][.//span[normalize-space()="定时发布"]]'
+            ).first
+            await schedule_field.wait_for(state="visible", timeout=10000)
 
-            # Click the datetime trigger to open the picker
-            datetime_trigger = page.locator(
+            schedule_switch = schedule_field.locator(
+                'button[role="switch"][dt-params*="is_timed_publish"], button[role="switch"]'
+            ).first
+            await schedule_switch.wait_for(state="visible", timeout=10000)
+
+            is_checked = await schedule_switch.get_attribute("aria-checked")
+            logger.info("[定时发布] Initial switch state: %s", is_checked)
+            if is_checked != "true":
+                await schedule_switch.click()
+                await asyncio.sleep(0.8)
+                is_checked = await schedule_switch.get_attribute("aria-checked")
+                logger.info("[定时发布] Switch state after click: %s", is_checked)
+                if is_checked != "true":
+                    logger.warning("[定时发布] 定时发布开关点击后仍未开启")
+                    return
+
+            datetime_trigger = schedule_field.locator(
                 'div[class*="dateTimeSelect"]'
             ).first
-            if await datetime_trigger.count() == 0:
-                logger.warning("[定时发布] Datetime trigger not found")
-                return
-
+            await datetime_trigger.wait_for(state="visible", timeout=5000)
             await datetime_trigger.click()
-            await asyncio.sleep(1)
+            logger.info("[定时发布] Datetime trigger clicked")
+            await asyncio.sleep(0.5)
 
-            # Wait for the popup to appear
             popup = page.locator('div[class*="popupWrap"]').first
-            if await popup.count() == 0:
-                logger.warning("[定时发布] Datetime popup not found")
+            await popup.wait_for(state="visible", timeout=5000)
+            logger.info("[定时发布] Datetime popup visible")
+
+            columns = popup.locator('div[class*="listWrap"]')
+            column_count = await columns.count()
+            logger.info("[定时发布] Popup column count: %s", column_count)
+            if column_count < 3:
+                logger.warning("[定时发布] 定时发布弹层列数不足: %s", column_count)
                 return
 
-            # Format date components as they appear in the popup
-            date_str = publish_date.strftime("%Y-%m-%d")
-            hour_str = f"{publish_date.hour}时"
-            minute_str = f"{publish_date.minute}分"
+            def _parse_value(part_name: str, text: str):
+                value = (text or "").strip()
+                if part_name == "date":
+                    return value
+                if part_name == "hour":
+                    return int(value.replace("时", "").strip())
+                if part_name == "minute":
+                    return int(value.replace("分", "").strip())
+                return value
 
-            # Select date in the first list
-            date_item = popup.locator(
-                f'div[class*="itemWrap"]:has-text("{date_str}")'
-            ).first
-            if await date_item.count() > 0:
-                await date_item.click()
-                await asyncio.sleep(0.3)
+            async def _read_column_snapshot(column, part_name: str):
+                snapshot = await column.evaluate(
+                    """(el) => {
+                        const listEl = el;
+                        const colRect = listEl.getBoundingClientRect();
+                        const centerY = colRect.top + colRect.height / 2;
+                        const nodes = Array.from(
+                            listEl.querySelectorAll('div[class*="itemWrap"]')
+                        );
+                        const items = nodes
+                            .map((node, index) => {
+                                const text = (node.textContent || '').trim();
+                                if (!text) return null;
+                                const rect = node.getBoundingClientRect();
+                                const style = window.getComputedStyle(node);
+                                const overlaps =
+                                    rect.bottom > colRect.top &&
+                                    rect.top < colRect.bottom;
+                                const displayVisible =
+                                    style.display !== 'none' &&
+                                    style.visibility !== 'hidden' &&
+                                    parseFloat(style.opacity || '1') !== 0;
+                                return {
+                                    index,
+                                    text,
+                                    top: rect.top,
+                                    bottom: rect.bottom,
+                                    height: rect.height,
+                                    center: rect.top + rect.height / 2,
+                                    overlaps,
+                                    displayVisible,
+                                    selected: String(node.className || '').includes('selected'),
+                                };
+                            })
+                            .filter(Boolean);
 
-            # Select hour in the second list
-            hour_item = popup.locator(
-                f'div[class*="itemWrap"]:has-text("{hour_str}")'
-            ).first
-            if await hour_item.count() > 0:
-                await hour_item.click()
-                await asyncio.sleep(0.3)
+                        const visibleItems = items.filter(
+                            (item) => item.overlaps && item.displayVisible
+                        );
+                        const selectedVisible = visibleItems.find((item) => item.selected) || null;
+                        const selectedAny = items.find((item) => item.selected) || null;
+                        const nearestVisible =
+                            visibleItems
+                                .slice()
+                                .sort(
+                                    (a, b) =>
+                                        Math.abs(a.center - centerY) - Math.abs(b.center - centerY)
+                                )[0] || null;
 
-            # Select minute in the third list
-            minute_item = popup.locator(
-                f'div[class*="itemWrap"]:has-text("{minute_str}")'
-            ).first
-            if await minute_item.count() > 0:
-                await minute_item.click()
-                await asyncio.sleep(0.3)
+                        return {
+                            scrollTop: listEl.scrollTop,
+                            scrollHeight: listEl.scrollHeight,
+                            clientHeight: listEl.clientHeight,
+                            visibleTexts: visibleItems.map((item) => item.text),
+                            selectedVisibleText: selectedVisible ? selectedVisible.text : '',
+                            selectedAnyText: selectedAny ? selectedAny.text : '',
+                            nearestVisibleText: nearestVisible ? nearestVisible.text : '',
+                            stepDelta:
+                                nearestVisible && nearestVisible.height
+                                    ? Math.max(28, Math.min(72, Math.round(nearestVisible.height)))
+                                    : 40,
+                        };
+                    }"""
+                )
+                logger.info(
+                    "[定时发布] %s column snapshot: selected_visible=%s selected_any=%s nearest_visible=%s step_delta=%s scrollTop=%s visible_items=%s",
+                    part_name,
+                    snapshot.get("selectedVisibleText", ""),
+                    snapshot.get("selectedAnyText", ""),
+                    snapshot.get("nearestVisibleText", ""),
+                    snapshot.get("stepDelta", 40),
+                    snapshot.get("scrollTop", 0),
+                    snapshot.get("visibleTexts", []),
+                )
+                return snapshot
 
-            # Click "确定" (confirm) button in the popup footer
-            confirm_btn = popup.locator('button:has-text("确定")').first
+            async def _scroll_column(column, delta: int, part_name: str, round_index: int):
+                metrics = await column.evaluate(
+                    """(el, d) => {
+                        el.scrollTop += d;
+                        return {
+                            scrollTop: el.scrollTop,
+                            scrollHeight: el.scrollHeight,
+                            clientHeight: el.clientHeight
+                        };
+                    }""",
+                    delta,
+                )
+                logger.info(
+                    "[定时发布] %s column round=%s scroll_delta=%s metrics=%s",
+                    part_name,
+                    round_index,
+                    delta,
+                    metrics,
+                )
+                await asyncio.sleep(0.45)
+
+            async def _click_visible_target(column, target_text: str, part_name: str, round_index: int):
+                clicked = await column.evaluate(
+                    """(el, targetText) => {
+                        const colRect = el.getBoundingClientRect();
+                        const nodes = Array.from(
+                            el.querySelectorAll('div[class*="itemWrap"]')
+                        );
+                        const targetNode = nodes.find((node) => {
+                            const text = (node.textContent || '').trim();
+                            if (text !== targetText) return false;
+                            const rect = node.getBoundingClientRect();
+                            const style = window.getComputedStyle(node);
+                            const overlaps =
+                                rect.bottom > colRect.top &&
+                                rect.top < colRect.bottom;
+                            const displayVisible =
+                                style.display !== 'none' &&
+                                style.visibility !== 'hidden' &&
+                                parseFloat(style.opacity || '1') !== 0;
+                            return overlaps && displayVisible;
+                        });
+                        if (!targetNode) return false;
+                        targetNode.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        targetNode.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        targetNode.click();
+                        return true;
+                    }""",
+                    target_text,
+                )
+                logger.info(
+                    "[定时发布] %s column visible target click result=%s target=%s round=%s",
+                    part_name,
+                    clicked,
+                    target_text,
+                    round_index,
+                )
+                if not clicked:
+                    return False
+                await asyncio.sleep(0.35)
+                return True
+
+            async def _pick_popup_value(column_index: int, target_text: str, part_name: str, max_rounds: int):
+                column = columns.nth(column_index)
+                await column.wait_for(state="visible", timeout=5000)
+                target_value = _parse_value(part_name, target_text)
+                stagnant_rounds = 0
+                last_current_text = None
+
+                for round_index in range(1, max_rounds + 1):
+                    snapshot = await _read_column_snapshot(column, part_name)
+                    current_text = (
+                        snapshot.get("selectedVisibleText")
+                        or snapshot.get("selectedAnyText")
+                        or snapshot.get("nearestVisibleText")
+                        or ""
+                    ).strip()
+                    visible_items = snapshot.get("visibleTexts", [])
+                    step_delta = int(snapshot.get("stepDelta") or 40)
+
+                    if current_text == target_text:
+                        logger.info(
+                            "[定时发布] %s column already selected target=%s round=%s",
+                            part_name,
+                            target_text,
+                            round_index,
+                        )
+                        return True
+
+                    if target_text in visible_items:
+                        clicked = await _click_visible_target(column, target_text, part_name, round_index)
+                        if clicked:
+                            snapshot_after_click = await _read_column_snapshot(column, part_name)
+                            current_after_click = (
+                                snapshot_after_click.get("selectedVisibleText")
+                                or snapshot_after_click.get("nearestVisibleText")
+                                or snapshot_after_click.get("selectedAnyText")
+                                or ""
+                            ).strip()
+                            if current_after_click == target_text:
+                                logger.info(
+                                    "[定时发布] %s column target confirmed after click=%s",
+                                    part_name,
+                                    target_text,
+                                )
+                                return True
+                            logger.info(
+                                "[定时发布] %s column visible click did not change selection: current_after_click=%s target=%s",
+                                part_name,
+                                current_after_click,
+                                target_text,
+                            )
+
+                    if not current_text:
+                        logger.warning("[定时发布] %s column current_text empty, stop selecting", part_name)
+                        return False
+
+                    current_value = _parse_value(part_name, current_text)
+                    if current_value == target_value:
+                        if await _click_visible_target(column, target_text, part_name, round_index):
+                            snapshot_confirm = await _read_column_snapshot(column, part_name)
+                            confirm_text = (
+                                snapshot_confirm.get("selectedVisibleText")
+                                or snapshot_confirm.get("nearestVisibleText")
+                                or snapshot_confirm.get("selectedAnyText")
+                                or ""
+                            ).strip()
+                            if confirm_text == target_text:
+                                logger.info(
+                                    "[定时发布] %s column target confirmed after equal-value click=%s",
+                                    part_name,
+                                    target_text,
+                                )
+                                return True
+                        else:
+                            logger.info("[定时发布] %s column target confirmed after click=%s", part_name, target_text)
+                            return True
+
+                    if part_name == "date":
+                        direction = step_delta if current_value < target_value else -step_delta
+                    else:
+                        direction = step_delta if current_value < target_value else -step_delta
+
+                    if current_text == last_current_text:
+                        stagnant_rounds += 1
+                    else:
+                        stagnant_rounds = 0
+                        last_current_text = current_text
+
+                    if stagnant_rounds >= 3:
+                        direction = direction * 2
+                        logger.info(
+                            "[定时发布] %s column stagnant detected, increase delta to %s",
+                            part_name,
+                            direction,
+                        )
+
+                    await _scroll_column(column, direction, part_name, round_index)
+
+                logger.warning(
+                    "[定时发布] %s column failed to reach target=%s after %s rounds",
+                    part_name,
+                    target_text,
+                    max_rounds,
+                )
+                return False
+
+            date_ok = await _pick_popup_value(
+                0, publish_date.strftime("%Y-%m-%d"), "date", 180
+            )
+            hour_ok = await _pick_popup_value(
+                1, f"{publish_date.hour:02d}时", "hour", 40
+            )
+            minute_ok = await _pick_popup_value(
+                2, f"{publish_date.minute:02d}分", "minute", 80
+            )
+
+            logger.info(
+                "[定时发布] Selection result: date_ok=%s hour_ok=%s minute_ok=%s",
+                date_ok,
+                hour_ok,
+                minute_ok,
+            )
+
+            confirm_btn = popup.get_by_role("button", name="确定", exact=True).first
+            if await confirm_btn.count() == 0:
+                confirm_btn = popup.locator('button:has-text("确定")').first
             if await confirm_btn.count() > 0:
                 await confirm_btn.click()
                 logger.info("[定时发布] Schedule time confirmed: %s", publish_date)
                 await asyncio.sleep(1)
         except Exception as e:
-            logger.warning(
-                "Schedule time setup failed (non-blocking): %s", e
-            )
+            logger.warning("[定时发布] Schedule time setup failed (non-blocking): %s", e)
 
     @staticmethod
     async def _click_publish(page):
