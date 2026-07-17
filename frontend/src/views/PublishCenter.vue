@@ -46,6 +46,9 @@
           <el-button type="primary" :icon="Promotion" @click="publishAll" :disabled="publishing" class="header-btn header-btn--primary">
             {{ publishing ? '发布中...' : '一键发布' }}
           </el-button>
+          <el-button :icon="Upload" @click="importScheduledTask" :disabled="publishing" class="header-btn">
+            导入定时任务
+          </el-button>
         </div>
       </div>
 
@@ -604,6 +607,7 @@ import { useAutoSave } from '@/composables/useAutoSave'
 import { useBatchSetApply } from '@/composables/useBatchSetApply'
 import { frameApi } from '@/api/frame'
 import { draftApi } from '@/api/draft'
+import { scheduledTasksApi } from '@/api/scheduledTasks'
 import { settingsApi } from '@/api/v2'
 import { useRoute } from 'vue-router'
 import { HASHTAG_RE as DESC_HASHTAG_RE, countDescriptionHashtags, useAutoExtractHashtags } from '@/utils/hashtag'
@@ -1745,33 +1749,61 @@ watch(accountOverrides, () => { hasChanges.value = true }, { deep: true })
 
 // ========== Publish Methods ==========
 
+function serializeMediaItem(media, extraKeys = []) {
+  if (!media) return null
+  const result = {
+    id: media.id,
+    name: media.name,
+    stored_path: media.stored_path,
+    url: media.url,
+    size: media.size,
+    type: media.type,
+    duration: media.duration,
+    orientation: media.orientation,
+  }
+  for (const key of extraKeys) {
+    if (media[key] !== undefined) result[key] = media[key]
+  }
+  return result
+}
+
+function serializePublishSnapshot() {
+  return {
+    commonConfig: {
+      videoLandscape: serializeMediaItem(commonConfig.videoLandscape),
+      videoPortrait: serializeMediaItem(commonConfig.videoPortrait),
+      coverLandscape: serializeMediaItem(commonConfig.coverLandscape, ['_fromFrame']),
+      coverPortrait: serializeMediaItem(commonConfig.coverPortrait, ['_fromFrame']),
+    },
+    platformConfigs: JSON.parse(JSON.stringify(platformConfigs)),
+    platformOverrides: JSON.parse(JSON.stringify(platformOverrides)),
+    accountOverrides: JSON.parse(JSON.stringify(accountOverrides)),
+    platformChecked: { ...platformChecked },
+    accountChecked: { ...accountChecked },
+    publishAccountIds: [...publishAccountIds],
+    selectedPlatform: selectedPlatform.value,
+    selectedAccountId: selectedAccountId.value,
+    expandedGroups: [...expandedGroups.value],
+  }
+}
+
+function buildScheduledTaskName(snapshotData) {
+  const accountIds = snapshotData.publishAccountIds || []
+  for (const rawId of accountIds) {
+    const account = accountStore.accounts.find(item => item.id === rawId)
+    if (!account) continue
+    const platformKey = platformNameToKey[account.platform]
+    if (!platformKey) continue
+    const config = snapshotData.platformConfigs?.[platformKey] || {}
+    const title = (config.title || '').trim()
+    if (title) return `${title} 定时任务`
+  }
+  return '未命名定时任务'
+}
+
 async function saveDraft() {
   try {
-    const draftData = {
-      commonConfig: {
-        videoLandscape: commonConfig.videoLandscape
-          ? { id: commonConfig.videoLandscape.id, name: commonConfig.videoLandscape.name, stored_path: commonConfig.videoLandscape.stored_path, url: commonConfig.videoLandscape.url, size: commonConfig.videoLandscape.size, type: commonConfig.videoLandscape.type }
-          : null,
-        videoPortrait: commonConfig.videoPortrait
-          ? { id: commonConfig.videoPortrait.id, name: commonConfig.videoPortrait.name, stored_path: commonConfig.videoPortrait.stored_path, url: commonConfig.videoPortrait.url, size: commonConfig.videoPortrait.size, type: commonConfig.videoPortrait.type }
-          : null,
-        coverLandscape: commonConfig.coverLandscape
-          ? { id: commonConfig.coverLandscape.id, name: commonConfig.coverLandscape.name, stored_path: commonConfig.coverLandscape.stored_path, url: commonConfig.coverLandscape.url, size: commonConfig.coverLandscape.size, type: commonConfig.coverLandscape.type, _fromFrame: commonConfig.coverLandscape._fromFrame }
-          : null,
-        coverPortrait: commonConfig.coverPortrait
-          ? { id: commonConfig.coverPortrait.id, name: commonConfig.coverPortrait.name, stored_path: commonConfig.coverPortrait.stored_path, url: commonConfig.coverPortrait.url, size: commonConfig.coverPortrait.size, type: commonConfig.coverPortrait.type, _fromFrame: commonConfig.coverPortrait._fromFrame }
-          : null,
-      },
-      platformConfigs: JSON.parse(JSON.stringify(platformConfigs)),
-      platformOverrides: JSON.parse(JSON.stringify(platformOverrides)),
-      accountOverrides: JSON.parse(JSON.stringify(accountOverrides)),
-      platformChecked: { ...platformChecked },
-      accountChecked: { ...accountChecked },
-      publishAccountIds: [...publishAccountIds],
-      selectedPlatform: selectedPlatform.value,
-      selectedAccountId: selectedAccountId.value,
-      expandedGroups: [...expandedGroups.value],
-    }
+    const draftData = serializePublishSnapshot()
 
     if (currentDraftId.value) {
       await draftApi.updateDraft(currentDraftId.value, { draft_data: draftData })
@@ -1784,6 +1816,162 @@ async function saveDraft() {
   } catch (e) {
     ElMessage.error('草稿保存失败')
   }
+}
+
+async function importScheduledTask() {
+  const ok = await validatePublishBeforeSubmit({ checkCookies: false })
+  if (!ok) return
+
+  try {
+    const snapshotData = serializePublishSnapshot()
+    await scheduledTasksApi.importTask({
+      task_name: buildScheduledTaskName(snapshotData),
+      task_note: '',
+      snapshot_data: snapshotData,
+    })
+    ElMessage.success('已导入到定时任务列表')
+  } catch {
+    // 统一由请求拦截器处理提示
+  }
+}
+
+async function validatePublishBeforeSubmit({ checkCookies = true } = {}) {
+  // 没有选择任何发布账号时，不允许导入或发布
+  if (publishAccountIds.size === 0) {
+    ElMessage.warning('请至少选择一个发布账号')
+    return false
+  }
+
+  // 视频校验：扫全部 3 个源（commonConfig / platformOverrides / accountOverrides）
+  const hasAnyVideo = (() => {
+    if (commonConfig.videoLandscape || commonConfig.videoPortrait) return true
+    for (const aid of publishAccountIds) {
+      const ov = accountOverrides[aid]
+      if (ov && (ov.videoLandscape || ov.videoPortrait)) return true
+    }
+    for (const pkey of Object.keys(platformOverrides)) {
+      const pov = platformOverrides[pkey]
+      if (pov && (pov.videoLandscape || pov.videoPortrait)) return true
+    }
+    return false
+  })()
+  if (!hasAnyVideo) {
+    ElMessage.error('请先上传至少一个视频文件')
+    return false
+  }
+
+  // 汇总所有账号的结构化校验错误，再统一提示
+  const errors = []
+  const hasAnyCover = (() => {
+    if (commonConfig.coverLandscape || commonConfig.coverPortrait) return true
+    for (const aid of publishAccountIds) {
+      const ov = accountOverrides[aid]
+      if (ov && (ov.coverLandscape || ov.coverPortrait)) return true
+    }
+    for (const pkey of Object.keys(platformOverrides)) {
+      const pov = platformOverrides[pkey]
+      if (pov && (pov.coverLandscape || pov.coverPortrait)) return true
+    }
+    return false
+  })()
+  if (!hasAnyCover) {
+    errors.push({ type: '封面', accounts: ['所有账号都缺封面，请上传至少一张'] })
+  }
+
+  const accountsWithoutDeclaration = []
+  const accountsWithoutTitle = []
+  const accountsWithoutCover = []
+  const accountsVideoInvalid = []
+  const DECLARATION_PLATFORMS = {
+    xiaohongshu: 'aiContent',
+    douyin: 'aiContent',
+    kuaishou: 'aiContent',
+    bilibili: 'creationDeclaration',
+    baijiahao: 'creationDeclaration',
+    tencent_video: 'creationDeclaration',
+    iqiyi: 'creationDeclaration',
+    youtube: ['audience', 'alteredContent'],
+    tiktok: 'aiContent',
+    weibo: 'contentStatement',
+    alipay: 'authorStatement',
+  }
+
+  for (const group of accountGroups.value) {
+    if (group.accounts.length === 0) continue
+    for (const account of group.accounts) {
+      if (!publishAccountIds.has(account.id)) continue
+      const merged = resolveAccountConfig(group.key, account.id)
+      const declFields = DECLARATION_PLATFORMS[group.key]
+
+      if (declFields) {
+        const fields = Array.isArray(declFields) ? declFields : [declFields]
+        for (const field of fields) {
+          const value = merged[field]
+          const isEmpty = Array.isArray(value)
+            ? value.length === 0
+            : (typeof value === 'boolean' ? value === null || value === undefined : (!value && value !== 0))
+          if (isEmpty) {
+            accountsWithoutDeclaration.push(`${account.name}(${group.name})`)
+            break
+          }
+        }
+      }
+
+      if (!merged.title || !merged.title.trim()) {
+        accountsWithoutTitle.push(`${account.name}(${group.name})`)
+      }
+
+      if (!merged.coverLandscape && !merged.coverPortrait) {
+        accountsWithoutCover.push(`${account.name}(${group.name})`)
+      }
+
+      const video = merged.videoLandscape || merged.videoPortrait
+      if (!video || !video.duration || video.duration === 0) continue
+
+      const titleResult = validateTitleForPlatform(group.key, merged.title)
+      if (!titleResult.ok) {
+        accountsVideoInvalid.push(`${account.name}(${group.name}): ${titleResult.error}`)
+      }
+      const videoResult = validateVideoForPlatform(group.key, video.duration, video.size || 0)
+      if (!videoResult.ok) {
+        accountsVideoInvalid.push(`${account.name}(${group.name}): ${videoResult.error}`)
+      }
+    }
+  }
+
+  if (accountsWithoutDeclaration.length > 0) errors.push({ type: '作品声明', accounts: accountsWithoutDeclaration })
+  if (accountsWithoutTitle.length > 0) errors.push({ type: '标题', accounts: accountsWithoutTitle })
+  if (accountsWithoutCover.length > 0) errors.push({ type: '封面', accounts: accountsWithoutCover })
+  if (accountsVideoInvalid.length > 0) errors.push({ type: '视频校验', accounts: accountsVideoInvalid })
+
+  if (errors.length > 0) {
+    const maxShow = 3
+    const body = errors.map(e => {
+      const shown = e.accounts.length > maxShow
+        ? e.accounts.slice(0, maxShow).join('、') + ` 等 ${e.accounts.length} 个账号`
+        : e.accounts.join('、')
+      return `<div style="margin-bottom:6px;"><b style="color:#f56c6c">未设置${e.type}：</b>${shown}</div>`
+    }).join('')
+    ElNotification({
+      title: '发布前检查未通过',
+      message: body,
+      type: 'error',
+      dangerouslyUseHTMLString: true,
+      duration: 5000,
+    })
+    return false
+  }
+
+  // 只有真正发布时才做 Cookie 预检；导入定时任务不要求用户当场修复
+  if (checkCookies && appStore.accountCheckMode === 'pre-publish' && publishAccountIds.size > 0 && prePublishCheckRef.value) {
+    const accountsToCheck = accountStore.accounts.filter(a => publishAccountIds.has(a.id))
+    if (accountsToCheck.length > 0) {
+      const allValid = await prePublishCheckRef.value.open(accountsToCheck)
+      if (!allValid) return false
+    }
+  }
+
+  return true
 }
 
 async function restoreDraft(draftId) {
