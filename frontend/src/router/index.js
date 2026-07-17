@@ -16,6 +16,7 @@ const routes = [
   { path: '/image-publish', name: 'ImagePublish', component: () => import('../views/ImagePublish.vue'), meta: { icon: 'Picture', title: '图集发布' } },
   { path: '/publish-templates', name: 'PublishTemplates', component: () => import('../views/PublishTemplates.vue'), meta: { icon: 'Document', title: '渠道默认值' } },
   { path: '/publish-history', name: 'PublishHistory', component: PublishHistory, meta: { icon: 'Clock', title: '发布历史' } },
+  { path: '/scheduled-tasks', name: 'ScheduledTasks', component: () => import('../views/ScheduledTasks.vue'), meta: { icon: 'Clock', title: '定时任务' } },
   { path: '/publish-history/:batchId', name: 'PublishHistoryDetail', component: () => import('../views/PublishHistoryDetail.vue') },
   { path: '/changelog', name: 'Changelog', component: () => import('../views/Changelog.vue'), meta: { icon: 'Notebook', title: '更新日志' } },
   { path: '/settings', name: 'Settings', component: Settings, meta: { icon: 'Setting', title: '系统设置', isBottom: true } },

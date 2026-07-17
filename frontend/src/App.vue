@@ -93,9 +93,10 @@ const navItems = [
   { path: '/material-management', icon: Picture, title: '素材管理' },
   { path: '/publish-center', icon: Upload, title: '视频发布' },
   { path: '/image-publish', icon: Picture, title: '图集发布' },
-  { path: '/publish-templates', icon: Document, title: '渠道默认值' },
+  { path: '/publish-templates', icon: Document, title: '默认值' },
   { path: '/drafts', icon: Document, title: '草稿箱' },
   { path: '/publish-history', icon: Clock, title: '发布历史' },
+  { path: '/scheduled-tasks', icon: Clock, title: '定时任务' },
   { path: '/changelog', icon: Notebook, title: '更新日志' },
   { path: '/author', icon: UserFilled, title: '关于作者' },
   { path: '/feedback', icon: ChatDotRound, title: '一键反馈' }
