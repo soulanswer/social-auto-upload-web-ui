@@ -8,6 +8,7 @@
 """
 
 import json
+import queue
 import sqlite3
 import threading
 import time
@@ -22,7 +23,7 @@ from util._logger import get_channel_logger
 logger = get_channel_logger("scheduled_tasks")
 
 DB_PATH = BASE_DIR / "db" / "database.db"
-SCHEDULER_INTERVAL_SECONDS = 10
+SCHEDULER_INTERVAL_SECONDS = 3
 
 PLATFORM_ID_TO_KEY = {
     1: "xiaohongshu",
@@ -76,6 +77,8 @@ STATUS_LABELS = {
 
 _scheduler_lock = threading.Lock()
 _scheduler_started = False
+_stream_lock = threading.Lock()
+_stream_subscribers: list[queue.Queue] = []
 
 
 def ensure_scheduled_task_tables(conn: sqlite3.Connection) -> None:
@@ -167,6 +170,43 @@ def _json_loads(raw, default):
 def _now_str() -> str:
     """返回当前 ISO 时间字符串。"""
     return datetime.now().isoformat(timespec="seconds")
+
+
+def subscribe_task_events(*, maxsize: int = 100) -> queue.Queue:
+    """涓哄畾鏃朵换鍔″垪琛ㄧ殑 SSE 杩炴帴娉ㄥ唽涓€涓闃呴槦鍒椼€?"""
+    subscriber = queue.Queue(maxsize=maxsize)
+    with _stream_lock:
+        _stream_subscribers.append(subscriber)
+    return subscriber
+
+
+def unsubscribe_task_events(subscriber: queue.Queue) -> None:
+    """鍦?SSE 杩炴帴鍏抽棴鏃舵竻鐞嗚闃呴槦鍒楋紝閬垮厤鍐呭瓨鍫嗙Н銆?"""
+    with _stream_lock:
+        if subscriber in _stream_subscribers:
+            _stream_subscribers.remove(subscriber)
+
+
+def emit_task_event(task_id: str, *, reason: str = "updated", status: str = "") -> None:
+    """鍚戝墠绔彂閫佲€滄煇鏉″畾鏃朵换鍔″凡缁忓彂鐢熷彉鏇粹€濈殑淇″彿銆?"""
+    if not task_id:
+        return
+    payload = {
+        "task_id": task_id,
+        "reason": reason,
+        "timestamp": _now_str(),
+    }
+    if status:
+        payload["status"] = status
+    message = json.dumps(payload, ensure_ascii=False)
+    with _stream_lock:
+        subscribers = list(_stream_subscribers)
+    for subscriber in subscribers:
+        try:
+            subscriber.put_nowait(message)
+        except queue.Full:
+            # 鏉ュ緱杩囧揩鏃跺彧涓㈠純鍗曟潯鍒锋柊淇″彿锛屽墠绔笅娆℃敹鍒颁簨浠朵緷鐒朵細鎷夊埌鏈€鏂扮姸鎬併€?
+            pass
 
 
 def _status_label(status: str) -> str:
@@ -417,15 +457,31 @@ def _recompute_publish_batch(conn: sqlite3.Connection, batch_id: str) -> str:
 
 def refresh_scheduled_task_status(conn: sqlite3.Connection, scheduled_task_id: str) -> str:
     """根据账号级 publish_details 状态回写 scheduled_tasks。"""
-    rows = conn.execute(
-        """
-        SELECT batch_id, status, error_code, error_message, finished_at, started_at, created_at
-        FROM publish_details
-        WHERE scheduled_task_id = ?
-        ORDER BY COALESCE(finished_at, started_at, created_at) DESC
-        """,
+    batch_row = conn.execute(
+        "SELECT publish_batch_id FROM scheduled_tasks WHERE id = ?",
         (scheduled_task_id,),
-    ).fetchall()
+    ).fetchone()
+    active_batch_id = (batch_row["publish_batch_id"] if batch_row else "") or ""
+    if active_batch_id:
+        rows = conn.execute(
+            """
+            SELECT batch_id, status, error_code, error_message, finished_at, started_at, created_at
+            FROM publish_details
+            WHERE scheduled_task_id = ? AND batch_id = ?
+            ORDER BY COALESCE(finished_at, started_at, created_at) DESC
+            """,
+            (scheduled_task_id, active_batch_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT batch_id, status, error_code, error_message, finished_at, started_at, created_at
+            FROM publish_details
+            WHERE scheduled_task_id = ?
+            ORDER BY COALESCE(finished_at, started_at, created_at) DESC
+            """,
+            (scheduled_task_id,),
+        ).fetchall()
     if not rows:
         return ""
 
@@ -537,6 +593,7 @@ def import_task(data: dict) -> dict:
             ),
         )
         conn.commit()
+    emit_task_event(task_id, reason="imported", status="draft")
     return {"id": task_id, "status": "draft"}
 
 
@@ -565,6 +622,7 @@ def schedule_task(task_id: str, scheduled_at: str) -> dict:
             (schedule_dt.strftime("%Y-%m-%d %H:%M:%S"), next_status, _now_str(), task_id),
         )
         conn.commit()
+    emit_task_event(task_id, reason="scheduled", status=next_status)
     return {"id": task_id, "status": next_status, "scheduled_at": schedule_dt.strftime("%Y-%m-%d %H:%M:%S")}
 
 
@@ -588,12 +646,13 @@ def delete_task(task_id: str) -> dict:
             (_now_str(), _now_str(), task_id),
         )
         conn.commit()
+    emit_task_event(task_id, reason="cancelled", status="cancelled")
     return {"id": task_id, "status": "cancelled"}
 
 
 def run_now(task_id: str) -> dict:
     """手动立即执行任务。"""
-    return dispatch_task(task_id, allowed_statuses={"draft", "scheduled"})
+    return dispatch_task(task_id, allowed_statuses={"draft", "scheduled", "success", "partial", "failed"})
 
 
 def dispatch_due_tasks() -> None:
@@ -646,11 +705,12 @@ def start_scheduler() -> None:
 def _claim_task(conn: sqlite3.Connection, task_id: str, allowed_statuses: set[str]) -> dict:
     """抢占任务，确保定时派发与立即执行不会重复运行。"""
     placeholders = ",".join("?" * len(allowed_statuses))
-    params = [_now_str(), _now_str(), task_id, *allowed_statuses]
+    now = _now_str()
+    params = [now, now, task_id, *allowed_statuses]
     cur = conn.execute(
         f"""
         UPDATE scheduled_tasks
-        SET status = 'dispatching', updated_at = ?, dispatched_at = COALESCE(dispatched_at, ?)
+        SET status = 'dispatching', updated_at = ?, dispatched_at = ?, finished_at = NULL, last_error = ''
         WHERE id = ?
           AND deleted_at IS NULL
           AND status IN ({placeholders})
@@ -685,13 +745,14 @@ def _build_pending_channel_statuses(conn: sqlite3.Connection, task_row: dict) ->
         else:
             platform_name = "未知平台"
             account_name = f"账号{account_id}"
+        pending_status = task_row.get("status") if task_row.get("status") in {"draft", "scheduled", "dispatching", "queued", "running"} else "draft"
         result.append(
             {
                 "platform": platform_name,
                 "account_name": account_name,
                 "display_name": _build_display_name(platform_name, account_name),
-                "status": task_row.get("status") if task_row.get("status") in {"draft", "scheduled"} else "draft",
-                "status_label": _status_label(task_row.get("status") if task_row.get("status") in {"draft", "scheduled"} else "draft"),
+                "status": pending_status,
+                "status_label": _status_label(pending_status),
                 "error_message": "",
             }
         )
@@ -708,11 +769,13 @@ def _read_channel_statuses(conn: sqlite3.Connection, task_row: dict) -> list[dic
         """
         SELECT platform, account_name, status, error_message
         FROM publish_details
-        WHERE scheduled_task_id = ?
+        WHERE scheduled_task_id = ? AND batch_id = ?
         ORDER BY created_at ASC
         """,
-        (task_id,),
+        (task_id, batch_id),
     ).fetchall()
+    if not rows:
+        return _build_pending_channel_statuses(conn, task_row)
     return [
         {
             "platform": row["platform"],
@@ -802,10 +865,10 @@ def get_task_detail(task_id: str) -> dict:
                 """
                 SELECT *
                 FROM publish_details
-                WHERE scheduled_task_id = ?
+                WHERE scheduled_task_id = ? AND batch_id = ?
                 ORDER BY created_at ASC
                 """,
-                (task_id,),
+                (task_id, batch_id),
             ).fetchall()
             for detail in detail_rows:
                 detail_dict = dict(detail)
@@ -840,7 +903,7 @@ def get_task_detail(task_id: str) -> dict:
                         ],
                     }
                 )
-        else:
+        if not accounts:
             snapshot = _normalize_snapshot(_json_loads(task.get("snapshot_data"), {}))
             for raw_account_id in snapshot.get("publishAccountIds") or []:
                 try:
@@ -982,6 +1045,7 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
         )
         conn.commit()
 
+    emit_task_event(task_id, reason="dispatching", status="dispatching")
     from ext_api.task_queue import PublishTask, get_task_queue
 
     queue = get_task_queue()
@@ -1027,6 +1091,7 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
                 _recompute_publish_batch(conn, batch_id)
                 refresh_scheduled_task_status(conn, task_id)
                 conn.commit()
+            emit_task_event(task_id, reason="progress")
             continue
 
         record = get_account_record(account_id)
@@ -1057,6 +1122,7 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
                 _recompute_publish_batch(conn, batch_id)
                 refresh_scheduled_task_status(conn, task_id)
                 conn.commit()
+            emit_task_event(task_id, reason="progress")
             continue
 
         platform_key = PLATFORM_ID_TO_KEY.get(record.get("type"), "")
@@ -1109,6 +1175,7 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
                 _recompute_publish_batch(conn, batch_id)
                 refresh_scheduled_task_status(conn, task_id)
                 conn.commit()
+            emit_task_event(task_id, reason="progress")
             continue
 
         step_logs.append(
@@ -1239,6 +1306,7 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
                 _recompute_publish_batch(conn, batch_id)
                 refresh_scheduled_task_status(conn, task_id)
                 conn.commit()
+            emit_task_event(task_id, reason="progress")
             continue
 
     with _db_conn() as conn:
@@ -1248,8 +1316,14 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
                 "UPDATE scheduled_tasks SET status = 'queued', updated_at = ? WHERE id = ?",
                 (_now_str(), task_id),
             )
+            final_status = "queued"
         else:
-            refresh_scheduled_task_status(conn, task_id)
+            final_status = refresh_scheduled_task_status(conn, task_id) or "failed"
         conn.commit()
 
-    return {"id": task_id, "status": "queued" if enqueued_count > 0 else "failed", "publish_batch_id": batch_id}
+    emit_task_event(
+        task_id,
+        reason="queued" if enqueued_count > 0 else "finished",
+        status=final_status,
+    )
+    return {"id": task_id, "status": final_status, "publish_batch_id": batch_id}

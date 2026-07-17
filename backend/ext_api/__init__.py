@@ -384,6 +384,28 @@ def get_scheduled_tasks():
         return jsonify({"code": 500, "msg": str(e)}), 500
 
 
+@ext_api.route('/scheduled-tasks/stream', methods=['GET'])
+def scheduled_task_stream():
+    """SSE 实时推送定时任务列表变更信号。"""
+    subscriber = scheduled_task_service.subscribe_task_events()
+
+    def generate():
+        try:
+            while True:
+                try:
+                    data = subscriber.get(timeout=30)
+                    yield f"data: {data}\n\n"
+                except queue.Empty:
+                    yield ": heartbeat\n\n"
+        finally:
+            scheduled_task_service.unsubscribe_task_events(subscriber)
+
+    response = Response(generate(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    return response
+
+
 @ext_api.route('/scheduled-tasks/<task_id>/schedule', methods=['PATCH'])
 def schedule_scheduled_task(task_id):
     """给定时任务设置或修改发布时间。"""

@@ -160,6 +160,38 @@ class TestScheduledTasksEndpoints(unittest.TestCase):
         self.assertTrue(
             any(log['action'] == 'Cookie校验' and log['result'] == 'failed' for log in detail['accounts'][0]['operation_logs'])
         )
+    def test_run_now_allows_retry_from_failed_status(self):
+        """failed 状态的定时任务也应允许立即执行。"""
+        resp = self.client.post(
+            '/api/v2/scheduled-tasks/import',
+            json={
+                "task_name": "失败后重跑任务",
+                "task_note": "",
+                "snapshot_data": _build_snapshot(),
+            },
+        )
+        task_id = resp.get_json()['data']['id']
+
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute(
+            "UPDATE scheduled_tasks SET status = 'failed', publish_batch_id = 'old-batch-id' WHERE id = ?",
+            (task_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch(
+            'services.scheduled_tasks.dispatch_task',
+            return_value={"id": task_id, "status": "queued", "publish_batch_id": "new-batch-id"},
+        ) as dispatch_mock:
+            resp = self.client.post(f'/api/v2/scheduled-tasks/{task_id}/run-now')
+
+        self.assertEqual(resp.status_code, 200)
+        dispatch_mock.assert_called_once()
+        self.assertEqual(
+            dispatch_mock.call_args.kwargs['allowed_statuses'],
+            {"draft", "scheduled", "success", "partial", "failed"},
+        )
 
 
 if __name__ == '__main__':

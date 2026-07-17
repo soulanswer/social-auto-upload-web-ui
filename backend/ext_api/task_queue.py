@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from conf import BASE_DIR
 from util._logger import get_channel_logger
 from impl.registry import get_platform
-from services.scheduled_tasks import refresh_scheduled_task_status, write_publish_result_log
+from services.scheduled_tasks import emit_task_event, refresh_scheduled_task_status, write_publish_result_log
 
 logger = get_channel_logger("task_queue")
 
@@ -440,6 +440,8 @@ class TaskQueue:
                 if task.scheduled_task_id:
                     refresh_scheduled_task_status(conn, task.scheduled_task_id)
                 conn.commit()
+            if task.scheduled_task_id:
+                emit_task_event(task.scheduled_task_id, reason="detail-status", status=task.status.value)
             if task.scheduled_task_id and task.status in {TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.CANCELLED}:
                 result_message = (
                     '发布成功'
