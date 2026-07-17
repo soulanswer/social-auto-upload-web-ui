@@ -106,6 +106,8 @@ def init_database():
         success_count INTEGER NOT NULL DEFAULT 0,
         failed_count INTEGER NOT NULL DEFAULT 0,
         schedule_time TEXT DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        draft_id INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         started_at TIMESTAMP,
         finished_at TIMESTAMP,
@@ -128,6 +130,9 @@ def init_database():
         retry_count INTEGER NOT NULL DEFAULT 0,
         max_retries INTEGER NOT NULL DEFAULT 3,
         error_message TEXT NOT NULL DEFAULT '',
+        scheduled_task_id TEXT NOT NULL DEFAULT '',
+        error_code TEXT NOT NULL DEFAULT '',
+        error_source TEXT NOT NULL DEFAULT '',
         publish_url TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         started_at TIMESTAMP,
@@ -138,6 +143,61 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_details_batch ON publish_details(batch_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_details_status ON publish_details(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_details_platform ON publish_details(platform)")
+    # 注意：旧库里 publish_details 可能还没有 scheduled_task_id 列。
+    # 这里不能直接建索引，否则首次启动会在 migrate_database 执行前崩掉。
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_details_scheduled_task ON publish_details(scheduled_task_id)")
+    except sqlite3.OperationalError:
+        pass
+
+    # 定时任务主表
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL DEFAULT 'video',
+        task_name TEXT NOT NULL DEFAULT '',
+        task_note TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'publish_center',
+        snapshot_data TEXT NOT NULL DEFAULT '{}',
+        scheduled_at TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'draft',
+        publish_batch_id TEXT NOT NULL DEFAULT '',
+        account_count INTEGER NOT NULL DEFAULT 0,
+        channel_count INTEGER NOT NULL DEFAULT 0,
+        title TEXT NOT NULL DEFAULT '',
+        tag_summary TEXT NOT NULL DEFAULT '',
+        channel_names TEXT NOT NULL DEFAULT '[]',
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        dispatched_at TIMESTAMP,
+        finished_at TIMESTAMP,
+        deleted_at TIMESTAMP
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_time ON scheduled_tasks(status, scheduled_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_deleted ON scheduled_tasks(deleted_at)")
+
+    # 定时任务账号步骤日志
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS publish_detail_logs (
+        id TEXT PRIMARY KEY,
+        detail_id TEXT NOT NULL,
+        scheduled_task_id TEXT NOT NULL DEFAULT '',
+        step_order INTEGER NOT NULL DEFAULT 0,
+        stage TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL DEFAULT '',
+        result TEXT NOT NULL DEFAULT 'info',
+        message TEXT NOT NULL DEFAULT '',
+        expected_value TEXT NOT NULL DEFAULT '',
+        actual_value TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        meta_json TEXT NOT NULL DEFAULT '{}',
+        FOREIGN KEY (detail_id) REFERENCES publish_details(id) ON DELETE CASCADE
+    )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_detail_logs_detail ON publish_detail_logs(detail_id, step_order)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_detail_logs_task ON publish_detail_logs(scheduled_task_id, created_at)")
 
     # 素材库表
     cursor.execute("""
@@ -266,6 +326,75 @@ def migrate_database():
         logger.info("已创建 idx_publish_batches_draft 索引")
     except sqlite3.OperationalError:
         pass  # 索引已存在
+
+    # publish_details 增加定时任务关联与失败分类字段
+    try:
+        cursor.execute("ALTER TABLE publish_details ADD COLUMN scheduled_task_id TEXT NOT NULL DEFAULT ''")
+        logger.info("已添加 publish_details.scheduled_task_id 列")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE publish_details ADD COLUMN error_code TEXT NOT NULL DEFAULT ''")
+        logger.info("已添加 publish_details.error_code 列")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE publish_details ADD COLUMN error_source TEXT NOT NULL DEFAULT ''")
+        logger.info("已添加 publish_details.error_source 列")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_details_scheduled_task ON publish_details(scheduled_task_id)")
+        logger.info("已创建 idx_publish_details_scheduled_task 索引")
+    except sqlite3.OperationalError:
+        pass
+
+    # 定时任务主表与步骤日志表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scheduled_tasks (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL DEFAULT 'video',
+            task_name TEXT NOT NULL DEFAULT '',
+            task_note TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'publish_center',
+            snapshot_data TEXT NOT NULL DEFAULT '{}',
+            scheduled_at TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft',
+            publish_batch_id TEXT NOT NULL DEFAULT '',
+            account_count INTEGER NOT NULL DEFAULT 0,
+            channel_count INTEGER NOT NULL DEFAULT 0,
+            title TEXT NOT NULL DEFAULT '',
+            tag_summary TEXT NOT NULL DEFAULT '',
+            channel_names TEXT NOT NULL DEFAULT '[]',
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            dispatched_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            deleted_at TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_time ON scheduled_tasks(status, scheduled_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_deleted ON scheduled_tasks(deleted_at)")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS publish_detail_logs (
+            id TEXT PRIMARY KEY,
+            detail_id TEXT NOT NULL,
+            scheduled_task_id TEXT NOT NULL DEFAULT '',
+            step_order INTEGER NOT NULL DEFAULT 0,
+            stage TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL DEFAULT '',
+            result TEXT NOT NULL DEFAULT 'info',
+            message TEXT NOT NULL DEFAULT '',
+            expected_value TEXT NOT NULL DEFAULT '',
+            actual_value TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (detail_id) REFERENCES publish_details(id) ON DELETE CASCADE
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_detail_logs_detail ON publish_detail_logs(detail_id, step_order)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_publish_detail_logs_task ON publish_detail_logs(scheduled_task_id, created_at)")
 
     # 确保 tags 表存在（幂等）
     cursor.execute("""

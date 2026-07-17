@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS publish_details (
     retry_count INTEGER NOT NULL DEFAULT 0,
     max_retries INTEGER NOT NULL DEFAULT 3,
     error_message TEXT NOT NULL DEFAULT '',
+    scheduled_task_id TEXT NOT NULL DEFAULT '',
+    error_code TEXT NOT NULL DEFAULT '',
+    error_source TEXT NOT NULL DEFAULT '',
     publish_url TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
@@ -67,6 +70,7 @@ def _setup():
 class TestTaskQueueWrites(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        os.environ['SAU_DATA_DIR'] = _tmpdir
         _setup()
         from ext_api.task_queue import PublishTask, TaskStatus
         cls.PublishTask = PublishTask

@@ -34,6 +34,8 @@ from conf import (
     FEEDBACK_APP_SECRET,
     FEEDBACK_API_TIMEOUT,
 )
+from services.account_cookie_check import check_cookie_by_record, update_account_status
+from services.scheduled_tasks import start_scheduler as start_scheduled_task_scheduler
 from util._logger import get_channel_logger
 from util.publish_debug import log_event
 
@@ -543,16 +545,9 @@ def check_account():
     if not record:
         return jsonify({"code": 404, "msg": "账号不存在"}), 404
 
-    platform = get_platform(record['type'])
-    if not platform:
-        return jsonify({"code": 400, "msg": "不支持的平台类型"}), 400
-
-    valid = asyncio.run(platform.check_cookie(record['filePath']))
+    valid, msg = check_cookie_by_record(record)
+    update_account_status(record['id'], valid)
     new_status = 1 if valid else 0
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        conn.execute('UPDATE user_info SET status = ? WHERE id = ?', (new_status, record['id']))
-
-    msg = "Cookie 有效" if valid else "Cookie 已失效，请重新登录"
     return jsonify({"code": 200, "msg": msg, "data": {"id": record['id'], "status": new_status, "valid": valid}})
 
 
@@ -1575,6 +1570,11 @@ if __name__ == "__main__":
         start_repair_in_background()
     except Exception as _e:
         logger.warning("[Startup] 补全任务启动失败（不影响主服务）: %s", _e)
+
+    try:
+        start_scheduled_task_scheduler()
+    except Exception as _e:
+        logger.warning("[Startup] 定时任务调度器启动失败（不影响主服务）: %s", _e)
 
     # 账号登录状态检查机制:如果设置为「启动时检测」,后台异步检测所有账号 cookie
     try:

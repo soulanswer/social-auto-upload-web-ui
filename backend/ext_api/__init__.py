@@ -22,6 +22,7 @@ from ._personalized import compute_personalized
 from services.draft_merge import (
     merge_config, validate_draft_for_publish, build_platform_kwargs,
 )
+from services import scheduled_tasks as scheduled_task_service
 
 ext_api = Blueprint('ext_api', __name__, url_prefix='/api/v2')
 
@@ -56,11 +57,12 @@ _tables_ensured = False
 
 
 def _ensure_tables(conn):
-    """确保 drafts 表存在（兼容旧版本数据库升级）。"""
+    """确保 drafts 与定时任务相关表存在（兼容旧版本数据库升级）。"""
     global _tables_ensured
     if _tables_ensured:
         return
     try:
+        scheduled_task_service.ensure_scheduled_task_tables(conn)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS drafts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -341,6 +343,94 @@ def queue_status():
     """获取任务队列状态"""
     tq = get_task_queue()
     return jsonify({"code": 200, "data": tq.get_status()})
+
+
+# ========== 定时任务 ==========
+
+@ext_api.route('/scheduled-tasks/import', methods=['POST'])
+def import_scheduled_task():
+    """从发布页导入一条定时任务快照，不立即执行。"""
+    data = request.get_json() or {}
+    try:
+        result = scheduled_task_service.import_task(data)
+        return jsonify({"code": 200, "data": result})
+    except ValueError as e:
+        return jsonify({"code": 400, "msg": str(e)}), 400
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@ext_api.route('/scheduled-tasks', methods=['GET'])
+def get_scheduled_tasks():
+    """分页查询定时任务列表。"""
+    try:
+        page = int(request.args.get('page', 1))
+        page_size = int(request.args.get('pageSize', 20))
+    except ValueError:
+        return jsonify({"code": 400, "msg": "page/pageSize 必须是整数"}), 400
+
+    keyword = (request.args.get('keyword', '') or '').strip()
+    status = (request.args.get('status', '') or '').strip()
+
+    try:
+        result = scheduled_task_service.list_tasks(
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            status=status,
+        )
+        return jsonify({"code": 200, "data": result})
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@ext_api.route('/scheduled-tasks/<task_id>/schedule', methods=['PATCH'])
+def schedule_scheduled_task(task_id):
+    """给定时任务设置或修改发布时间。"""
+    data = request.get_json() or {}
+    try:
+        result = scheduled_task_service.schedule_task(task_id, data.get('scheduled_at', ''))
+        return jsonify({"code": 200, "data": result})
+    except ValueError as e:
+        return jsonify({"code": 400, "msg": str(e)}), 400
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@ext_api.route('/scheduled-tasks/<task_id>/run-now', methods=['POST'])
+def run_scheduled_task_now(task_id):
+    """立即执行定时任务，跳过原排期时间。"""
+    try:
+        result = scheduled_task_service.run_now(task_id)
+        return jsonify({"code": 200, "data": result})
+    except ValueError as e:
+        return jsonify({"code": 400, "msg": str(e)}), 400
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@ext_api.route('/scheduled-tasks/<task_id>', methods=['DELETE'])
+def delete_scheduled_task(task_id):
+    """删除或取消定时任务。"""
+    try:
+        result = scheduled_task_service.delete_task(task_id)
+        return jsonify({"code": 200, "data": result})
+    except ValueError as e:
+        return jsonify({"code": 400, "msg": str(e)}), 400
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@ext_api.route('/scheduled-tasks/<task_id>/detail', methods=['GET'])
+def get_scheduled_task_detail(task_id):
+    """获取定时任务详情弹窗数据。"""
+    try:
+        result = scheduled_task_service.get_task_detail(task_id)
+        return jsonify({"code": 200, "data": result})
+    except ValueError as e:
+        return jsonify({"code": 404, "msg": str(e)}), 404
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e)}), 500
 
 
 # ========== 发布历史 ==========

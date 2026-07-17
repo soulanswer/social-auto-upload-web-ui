@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from conf import BASE_DIR
 from util._logger import get_channel_logger
 from impl.registry import get_platform
+from services.scheduled_tasks import refresh_scheduled_task_status, write_publish_result_log
 
 logger = get_channel_logger("task_queue")
 
@@ -94,6 +95,10 @@ class PublishTask:
     account_id: int = 0
     detail_id: str = ''            # publish_details.id
     payload: dict = field(default_factory=dict)
+    scheduled_task_id: str = ''
+    error_code: str = ''
+    error_source: str = ''
+    account_config_snapshot: dict = field(default_factory=dict)
 
     def to_dict(self):
         d = asdict(self)
@@ -134,12 +139,17 @@ class PublishTask:
             draft_id=row_dict.get('draft_id', 0),
             account_id=row_dict.get('account_id', 0),
             detail_id=row_dict.get('detail_id', ''),
+            scheduled_task_id=row_dict.get('scheduled_task_id', ''),
+            error_code=row_dict.get('error_code', ''),
+            error_source=row_dict.get('error_source', ''),
         )
 
 
 def _build_account_configs(task: 'PublishTask') -> dict:
     """构造写入 publish_details.account_configs 的 dict。
     含全 per-platform form 字段，让历史卡片能完整还原发布时的内容。"""
+    if task.account_config_snapshot:
+        return task.account_config_snapshot
     return {
         'title': task.title,
         'description': task.description,
@@ -360,6 +370,7 @@ class TaskQueue:
         """插 1 行 publish_batches（如果不存在）+ 1 行 publish_details"""
         try:
             with sqlite3.connect(str(DB_PATH)) as conn:
+                conn.row_factory = sqlite3.Row
                 # batch 插一次，多次同 batch_id 跳过
                 # 草稿批量发布时填 source='draft' + draft_id 溯源到草稿
                 conn.execute(
@@ -379,11 +390,12 @@ class TaskQueue:
                 conn.execute(
                     """INSERT INTO publish_details
                        (id, batch_id, account_id, account_name, platform, account_configs,
-                        status, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        status, created_at, scheduled_task_id, error_code, error_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (task.id, task.batch_id or task.id, task.account_id or None,
                      task.account_name, task.platform,
-                     json.dumps(cfg, ensure_ascii=False), task.status, task.created_at)
+                     json.dumps(cfg, ensure_ascii=False), task.status, task.created_at,
+                     task.scheduled_task_id or '', task.error_code or '', task.error_source or '')
                 )
         except Exception as e:
             logger.info(f"[TaskQueue] 插入数据库失败: {e}")
@@ -392,6 +404,7 @@ class TaskQueue:
         """更新 1 行 publish_details + 聚合 publish_batches 状态"""
         try:
             with sqlite3.connect(str(DB_PATH)) as conn:
+                conn.row_factory = sqlite3.Row
                 conn.execute(
                     """UPDATE publish_details
                        SET status=?, retry_count=?, error_message=?, publish_url=?,
@@ -423,6 +436,21 @@ class TaskQueue:
                            finished_at=?, updated_at=?
                        WHERE id=?""",
                     (bs, succ, fail, total, task.finished_at or now, now, batch_id)
+                )
+                if task.scheduled_task_id:
+                    refresh_scheduled_task_status(conn, task.scheduled_task_id)
+                conn.commit()
+            if task.scheduled_task_id and task.status in {TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                result_message = (
+                    '发布成功'
+                    if task.status == TaskStatus.SUCCESS
+                    else ('任务已取消' if task.status == TaskStatus.CANCELLED else (task.error_message or '发布失败'))
+                )
+                write_publish_result_log(
+                    detail_id=task.id,
+                    scheduled_task_id=task.scheduled_task_id,
+                    status=task.status.value,
+                    message=result_message,
                 )
         except Exception as e:
             logger.info(f"[TaskQueue] 更新数据库失败: {e}")
