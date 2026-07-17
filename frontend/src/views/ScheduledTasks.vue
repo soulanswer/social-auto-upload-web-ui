@@ -135,7 +135,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { scheduledTasksApi } from '@/api/scheduledTasks'
@@ -151,10 +151,11 @@ const page = ref(1)
 const pageSize = 20
 const keyword = ref('')
 const status = ref('')
-const selectedTask = ref(null)
+const selectedTaskId = ref('')
 const scheduleDialogVisible = ref(false)
 const detailDialogVisible = ref(false)
 const router = useRouter()
+const selectedTask = computed(() => tasks.value.find(task => task.id === selectedTaskId.value) || null)
 const statusLabelMap = {
   draft: '草稿',
   scheduled: '已排期',
@@ -168,13 +169,90 @@ const statusLabelMap = {
   invalid: '数据失效',
 }
 
+let eventSource = null
+let reconnectTimer = null
+let pendingRefreshTimer = null
+let allowReconnect = true
+let fetchSequence = 0
+
+function buildStreamUrl(path) {
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim()
+  if (!baseUrl) return path
+  return `${baseUrl.replace(/\/$/, '')}${path}`
+}
+
+function closeEventSource() {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+}
+
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
+function clearPendingRefresh() {
+  if (pendingRefreshTimer) {
+    window.clearTimeout(pendingRefreshTimer)
+    pendingRefreshTimer = null
+  }
+}
+
+function scheduleSilentRefresh(delay = 150) {
+  clearPendingRefresh()
+  pendingRefreshTimer = window.setTimeout(() => {
+    pendingRefreshTimer = null
+    fetchTasks({ silent: true })
+  }, delay)
+}
+
+function scheduleReconnect(delay = 3000) {
+  if (!allowReconnect || reconnectTimer) return
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null
+    if (!allowReconnect || document.hidden) return
+    connectSSE()
+  }, delay)
+}
+
+function connectSSE() {
+  if (!allowReconnect || eventSource || typeof EventSource === 'undefined') return
+  eventSource = new EventSource(buildStreamUrl('/api/v2/scheduled-tasks/stream'))
+  eventSource.onmessage = (event) => {
+    if (!event.data) return
+    scheduleSilentRefresh()
+  }
+  eventSource.onerror = () => {
+    closeEventSource()
+    scheduleReconnect()
+  }
+}
+
+function handleVisibilityChange() {
+  if (!document.hidden) {
+    scheduleSilentRefresh(0)
+    connectSSE()
+  }
+}
+
 onMounted(() => {
   fetchTasks()
+  connectSSE()
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
 /** 拉取定时任务列表 */
-async function fetchTasks() {
-  loading.value = true
+async function fetchTasks(options = {}) {
+  const normalizedOptions = typeof options === 'object' && options !== null ? options : {}
+  const silent = normalizedOptions.silent === true
+  const requestId = ++fetchSequence
+  if (!silent) {
+    loading.value = true
+  }
   try {
     const res = await scheduledTasksApi.getTasks({
       page: page.value,
@@ -182,10 +260,13 @@ async function fetchTasks() {
       keyword: keyword.value.trim(),
       status: status.value,
     })
+    if (requestId !== fetchSequence) return
     tasks.value = res.data?.items || []
     total.value = res.data?.total || 0
   } finally {
-    loading.value = false
+    if (!silent) {
+      loading.value = false
+    }
   }
 }
 
@@ -197,25 +278,25 @@ function handleSearch() {
 
 /** 打开设置时间弹窗 */
 function openSchedule(task) {
-  selectedTask.value = task
+  selectedTaskId.value = task.id
   scheduleDialogVisible.value = true
 }
 
 /** 打开详情弹窗 */
 function openDetail(task) {
-  selectedTask.value = task
+  selectedTaskId.value = task.id
   detailDialogVisible.value = true
 }
 
 /** 保存发布时间 */
 async function handleScheduleConfirm(scheduledAt) {
-  if (!selectedTask.value) return
+  if (!selectedTaskId.value) return
   scheduleSaving.value = true
   try {
-    await scheduledTasksApi.scheduleTask(selectedTask.value.id, scheduledAt)
+    await scheduledTasksApi.scheduleTask(selectedTaskId.value, scheduledAt)
     ElMessage.success('发布时间已保存')
     scheduleDialogVisible.value = false
-    fetchTasks()
+    fetchTasks({ silent: true })
   } finally {
     scheduleSaving.value = false
   }
@@ -235,7 +316,7 @@ async function handleRunNow(task) {
     )
     await scheduledTasksApi.runNow(task.id)
     ElMessage.success('任务已开始执行')
-    fetchTasks()
+    fetchTasks({ silent: true })
   } catch (error) {
     if (error !== 'cancel') {
       // 统一由请求拦截器提示，这里不重复报错
@@ -247,7 +328,7 @@ async function handleRunNow(task) {
 async function handleDelete(task) {
   await scheduledTasksApi.deleteTask(task.id)
   ElMessage.success('任务已删除')
-  fetchTasks()
+  fetchTasks({ silent: true })
 }
 
 /** 跳转到现有发布历史详情 */
@@ -266,6 +347,14 @@ function statusTagType(taskStatus) {
   if (taskStatus === 'dispatching' || taskStatus === 'queued' || taskStatus === 'running') return 'primary'
   return 'info'
 }
+
+onBeforeUnmount(() => {
+  allowReconnect = false
+  closeEventSource()
+  clearReconnectTimer()
+  clearPendingRefresh()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+})
 </script>
 
 <style lang="scss" scoped>
