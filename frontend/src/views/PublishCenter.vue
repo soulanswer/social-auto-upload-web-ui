@@ -84,18 +84,22 @@
             <div class="cover-grid">
               <CoverCard
                 label="竖版封面"
-                :ratio-label="appStore.portraitRatio"
-                v-model="currentEditTarget.coverPortrait"
+                :ratios="['3:4', '9:16']"
+                v-model:active-ratio="coverPortraitActiveRatio"
+                :model-value="coverPortraitActiveCover"
                 :has-video="!!(currentEditTarget.videoPortrait || currentEditTarget.videoLandscape)"
-                @edit="openCoverEditor('portrait')"
+                @update:modelValue="onPortraitCoverChange"
+                @edit="openCoverEditor('portrait', coverPortraitActiveRatio)"
                 @open-library="selectFromLibrary('cover', 'portrait')"
               />
               <CoverCard
                 label="横版封面"
-                :ratio-label="appStore.landscapeRatio"
-                v-model="currentEditTarget.coverLandscape"
+                :ratios="['4:3', '16:9']"
+                v-model:active-ratio="coverLandscapeActiveRatio"
+                :model-value="coverLandscapeActiveCover"
                 :has-video="!!(currentEditTarget.videoPortrait || currentEditTarget.videoLandscape)"
-                @edit="openCoverEditor('landscape')"
+                @update:modelValue="onLandscapeCoverChange"
+                @edit="openCoverEditor('landscape', coverLandscapeActiveRatio)"
                 @open-library="selectFromLibrary('cover', 'landscape')"
               />
             </div>
@@ -103,14 +107,12 @@
 
           <CoverEditorDialog
             ref="coverEditorRef"
+            :orientation="coverEditOrientation"
             :video-landscape="editorSource.videoLandscape"
             :video-portrait="editorSource.videoPortrait"
-            :cover-landscape="editorSource.coverLandscape"
-            :cover-portrait="editorSource.coverPortrait"
-            :portrait-ratio="appStore.portraitRatio"
-            :landscape-ratio="appStore.landscapeRatio"
-            @update:cover-landscape="onEditorUpdate({coverLandscape: $event})"
-            @update:cover-portrait="onEditorUpdate({coverPortrait: $event})"
+            :cover-primary="editorSource.coverPrimary"
+            :cover-secondary="editorSource.coverSecondary"
+            @cover-saved="onCoverSaved"
           />
         </div>
 
@@ -411,7 +413,14 @@
                     class="cursor-pointer"
                   />
                   <XhsPoiSelect
-                    v-else-if="field.type === 'poiSelect'"
+                    v-else-if="field.type === 'poiSelect' && !field.key.startsWith('vivo')"
+                    :account-id="selectedAccountId"
+                    v-model="form[field.key]"
+                    :data="form[field.key + 'Data']"
+                    @change="(val) => handleXhsPoiChange(field.key, val)"
+                  />
+                  <VivoPositionSelect
+                    v-else-if="field.type === 'poiSelect' && field.key.startsWith('vivo')"
                     :account-id="selectedAccountId"
                     v-model="form[field.key]"
                     :data="form[field.key + 'Data']"
@@ -595,6 +604,7 @@ import DouyinActivitySelect from '@/components/douyin/ActivitySelect.vue'
 import DouyinTagSelect from '@/components/douyin/TagSelect.vue'
 import { channelsApi } from '@/api/channels'
 import XhsPoiSelect from '@/components/xiaohongshu/PoiSelect.vue'
+import VivoPositionSelect from '@/components/vivo/PositionSelect.vue'
 import RemoteSearchSelect from '@/components/common/RemoteSearchSelect.vue'
 import PrePublishCheckDialog from '@/components/PrePublishCheckDialog.vue'
 import { xhsApi } from '@/api/xiaohongshu'
@@ -619,7 +629,6 @@ const appStore = useAppStore()
 appStore.loadAutoFillTitle()
 appStore.loadAccountCheckMode()
 appStore.loadAutoSaveSettings()
-appStore.loadCoverRatioSettings()
 const route = useRoute()
 
 // ========== Left Sidebar State ==========
@@ -654,12 +663,21 @@ const currentPlatformConfig = computed(() =>
   selectedPlatform.value ? getPlatformByKey(selectedPlatform.value) : null
 )
 
-const MEDIA_OVERRIDE_KEYS = ['coverPortrait', 'coverLandscape', 'videoPortrait', 'videoLandscape']
+const MEDIA_OVERRIDE_KEYS = [
+  'coverPortrait',
+  'coverLandscape',
+  'coverLandscape169',
+  'coverPortrait916',
+  'videoPortrait',
+  'videoLandscape',
+]
 
 function createMediaOverrideShell() {
   return {
     coverPortrait: null,
     coverLandscape: null,
+    coverLandscape169: null,
+    coverPortrait916: null,
     videoPortrait: null,
     videoLandscape: null,
   }
@@ -730,9 +748,17 @@ const currentHeaderTagText = computed(() => {
 const commonConfig = reactive({
   videoLandscape: null,
   videoPortrait: null,
-  coverLandscape: null,
-  coverPortrait: null,
+  coverLandscape: null,      // 横版封面 4:3（主尺寸）
+  coverPortrait: null,       // 竖版封面 3:4（主尺寸）
+  coverLandscape169: null,   // 横版封面 16:9（次尺寸，后续各平台按需使用）
+  coverPortrait916: null,    // 竖版封面 9:16（次尺寸）
 })
+
+// ===== 封面卡片 tab 激活比例 =====
+// 切换到不同编辑目标（公共/平台覆写/账号覆写）后重置到主尺寸
+// 对应的 watch 注册在 currentEditTarget 声明之后
+const coverPortraitActiveRatio = ref('3:4')    // 竖版卡：默认 3:4
+const coverLandscapeActiveRatio = ref('4:3')    // 横版卡：默认 4:3
 
 // 平台级覆写（spec §3.3）—— 公共区域的媒体字段覆写
 const platformOverrides = reactive({})         // { [platformKey]: { coverPortrait, coverLandscape, videoPortrait, videoLandscape } }
@@ -749,6 +775,12 @@ const currentEditTarget = computed(() => {
   const pk = selectedPlatform.value
   if (isPlatformOverrideEnabled(pk) && platformOverrides[pk]) return platformOverrides[pk]
   return commonConfig
+})
+
+// 切换编辑目标（公共 / 平台覆写 / 账号覆写）时，封面卡片激活 tab 重置到主尺寸
+watch(currentEditTarget, () => {
+  coverPortraitActiveRatio.value = '3:4'
+  coverLandscapeActiveRatio.value = '4:3'
 })
 
 function hasPlatformOverrideContent(platformKey) {
@@ -827,6 +859,8 @@ function mergeConfig(common, platformDefault, platformOv, accountOv) {
     // 视频/封面走 4 级合并 → commonConfig 兜底
     coverLandscape: accountOv?.coverLandscape ?? platformOv?.coverLandscape ?? common.coverLandscape,
     coverPortrait:  accountOv?.coverPortrait  ?? platformOv?.coverPortrait  ?? common.coverPortrait,
+    coverLandscape169: accountOv?.coverLandscape169 ?? platformOv?.coverLandscape169 ?? common.coverLandscape169,
+    coverPortrait916:  accountOv?.coverPortrait916  ?? platformOv?.coverPortrait916  ?? common.coverPortrait916,
     videoLandscape: accountOv?.videoLandscape ?? platformOv?.videoLandscape ?? common.videoLandscape,
     videoPortrait:  accountOv?.videoPortrait  ?? platformOv?.videoPortrait  ?? common.videoPortrait,
     // 平台特有字段走 platformDefault 兜底
@@ -836,6 +870,8 @@ function mergeConfig(common, platformDefault, platformOv, accountOv) {
     isOriginal: accountOv?.isOriginal ?? platformOv?.isOriginal ?? platformDefault?.isOriginal ?? false,
     // 平台特有字段：4 级合并（账号 > 渠道 > 平台默认），与视频/封面一致
     creationDeclaration: accountOv?.creationDeclaration ?? platformOv?.creationDeclaration ?? platformDefault?.creationDeclaration,
+    // B 站转载来源(创作声明=转载 时必填)
+    biliRepostSource: accountOv?.biliRepostSource ?? platformOv?.biliRepostSource ?? platformDefault?.biliRepostSource ?? '',
     riskWarning: accountOv?.riskWarning ?? platformOv?.riskWarning ?? platformDefault?.riskWarning,
     enableCashActivity: accountOv?.enableCashActivity ?? platformOv?.enableCashActivity ?? platformDefault?.enableCashActivity,
     supplementaryDeclaration: accountOv?.supplementaryDeclaration ?? platformOv?.supplementaryDeclaration ?? platformDefault?.supplementaryDeclaration,
@@ -880,6 +916,7 @@ function mergeConfig(common, platformDefault, platformOv, accountOv) {
     contentStatement: accountOv?.contentStatement ?? platformOv?.contentStatement ?? platformDefault?.contentStatement ?? '',
     // 支付宝
     authorStatement: accountOv?.authorStatement ?? platformOv?.authorStatement ?? platformDefault?.authorStatement ?? '',
+    reprintUrl: accountOv?.reprintUrl ?? platformOv?.reprintUrl ?? platformDefault?.reprintUrl ?? '',
     compilation: accountOv?.compilation ?? platformOv?.compilation ?? platformDefault?.compilation ?? '',
     compilationData: accountOv?.compilationData ?? platformOv?.compilationData ?? platformDefault?.compilationData ?? null,
     // 今日头条
@@ -896,27 +933,50 @@ function mergeConfig(common, platformDefault, platformOv, accountOv) {
     // 视频号位置(账号级,空=不显示位置)
     channelsLocationName: accountOv?.channelsLocationName ?? platformOv?.channelsLocationName ?? platformDefault?.channelsLocationName ?? '',
     channelsLocationData: accountOv?.channelsLocationData ?? platformOv?.channelsLocationData ?? platformDefault?.channelsLocationData ?? null,
+    // 视频号视频标注(平台级):所有选项(含「无需标注」)都会去页面真正选中
+    channelsMarkTag: accountOv?.channelsMarkTag ?? platformOv?.channelsMarkTag ?? platformDefault?.channelsMarkTag ?? '无需标注',
+    channelsShootDate: accountOv?.channelsShootDate ?? platformOv?.channelsShootDate ?? platformDefault?.channelsShootDate ?? '',
+    channelsShootRegion: accountOv?.channelsShootRegion ?? platformOv?.channelsShootRegion ?? platformDefault?.channelsShootRegion ?? [],
+    channelsRepostSource: accountOv?.channelsRepostSource ?? platformOv?.channelsRepostSource ?? platformDefault?.channelsRepostSource ?? '',
     // CSDN 是否推荐(平台级开关)
     recommend: accountOv?.recommend ?? platformOv?.recommend ?? platformDefault?.recommend ?? false,
+    // VIVO 平台特有字段(平台级)
+    vivoLocationName: accountOv?.vivoLocationName ?? platformOv?.vivoLocationName ?? platformDefault?.vivoLocationName ?? '',
+    vivoLocationData: accountOv?.vivoLocationData ?? platformOv?.vivoLocationData ?? platformDefault?.vivoLocationData ?? null,
+    vivoDistribution: accountOv?.vivoDistribution ?? platformOv?.vivoDistribution ?? platformDefault?.vivoDistribution ?? false,
+    vivoDeclaration: accountOv?.vivoDeclaration ?? platformOv?.vivoDeclaration ?? platformDefault?.vivoDeclaration ?? '',
+    vivoPrivacy: accountOv?.vivoPrivacy ?? platformOv?.vivoPrivacy ?? platformDefault?.vivoPrivacy ?? '公开',
+    vivoDownloadPermission: accountOv?.vivoDownloadPermission ?? platformOv?.vivoDownloadPermission ?? platformDefault?.vivoDownloadPermission ?? '允许',
   }
 }
 
 // ========== Override Section: CoverEditor source/target ==========
 // 公共区域的 CoverEditor 永远跟随 currentEditTarget（默认=commonConfig, 勾选时=覆写对象）
+// coverEditOrientation 记录当前打开的是横版还是竖版弹窗
+const coverEditOrientation = ref('landscape')
 const editorSource = computed(() => {
   const t = currentEditTarget.value
+  const isLandscape = coverEditOrientation.value === 'landscape'
   return {
     videoLandscape: t?.videoLandscape,
     videoPortrait:  t?.videoPortrait,
-    coverLandscape: t?.coverLandscape,
-    coverPortrait:  t?.coverPortrait,
+    // 横版：主尺寸=coverLandscape(4:3)，次尺寸=coverLandscape169(16:9)
+    // 竖版：主尺寸=coverPortrait(3:4)，次尺寸=coverPortrait916(9:16)
+    coverPrimary:   isLandscape ? t?.coverLandscape    : t?.coverPortrait,
+    coverSecondary: isLandscape ? t?.coverLandscape169 : t?.coverPortrait916,
   }
 })
 
-function onEditorUpdate({ coverLandscape, coverPortrait }) {
+// 确定性写回：直接按 orientation + ratio 映射到具体字段
+function onCoverSaved({ orientation, ratio, cover }) {
   const t = currentEditTarget.value
-  if (coverLandscape) t.coverLandscape = coverLandscape
-  if (coverPortrait)  t.coverPortrait  = coverPortrait
+  if (orientation === 'landscape') {
+    if (ratio === '4:3') t.coverLandscape = cover
+    else if (ratio === '16:9') t.coverLandscape169 = cover
+  } else {
+    if (ratio === '3:4') t.coverPortrait = cover
+    else if (ratio === '9:16') t.coverPortrait916 = cover
+  }
 }
 
 // Cover editor
@@ -941,18 +1001,21 @@ const platformConfigs = reactive({
   douyin: { title: '', description: '', tags: [], aiContent: '', isOriginal: false, scheduleTime: '', activityId: [], hotspotId: '', hotspotData: null, selectedTag: null, tagType: '', tagValue: '', mixId: '', mixData: null },
   xiaohongshu: { title: '', description: '', aiContent: '', isOriginal: false, scheduleTime: '', tags: [], collectionId: '', collectionName: '', collectionData: null },
   kuaishou: { title: '', description: '', aiContent: '', isOriginal: false, scheduleTime: '', tags: [] },
-  bilibili: { title: '', description: '', zone: '', tags: [], creationDeclaration: '', isOriginal: false, scheduleTime: '', biliCollectionName: '', biliCollectionData: null },
-  channels: { title: '', description: '', isOriginal: false, scheduleTime: '', tags: [], channelsCollectionName: '', channelsCollectionData: null, channelsLocationName: '', channelsLocationData: null },
+  bilibili: { title: '', description: '', zone: '', tags: [], creationDeclaration: '', biliRepostSource: '', isOriginal: false, scheduleTime: '', biliCollectionName: '', biliCollectionData: null },
+  channels: { title: '', description: '', isOriginal: false, scheduleTime: '', tags: [], channelsCollectionName: '', channelsCollectionData: null, channelsLocationName: '', channelsLocationData: null, channelsMarkTag: '无需标注', channelsShootDate: '', channelsShootRegion: [], channelsRepostSource: '' },
   baijiahao: { title: '', description: '', isOriginal: false, scheduleTime: '', tags: [] },
   tiktok: { title: '', description: '', aiContent: false, isOriginal: false, scheduleTime: '', tags: [] },
   youtube: { title: '', description: '', audience: 'not_kids', alteredContent: false, scheduleTime: '', tags: [] },
   iqiyi: { title: '', description: '', creationDeclaration: '', riskWarning: '', enableCashActivity: false, scheduleTime: '', tags: [] },
   tencent_video: { title: '', description: '', creationDeclaration: [], scheduleTime: '', tags: [] },
   weibo: { title: '', description: '', videoType: '', weiboCategory: [], contentStatement: '', tags: [], weiboCollectionName: '', weiboCollectionData: null },
-  alipay: { title: '', description: '', authorStatement: '', compilation: '', scheduleTime: '', tags: [] },
+  alipay: { title: '', description: '', authorStatement: '', reprintUrl: '', compilation: '', scheduleTime: '', tags: [] },
   toutiao: { title: '', description: '', creationDeclaration: [], enableGenerateImage: true, collection: '', extendLink: false, extendLinkUrl: '', scheduleTime: '', tags: [] },
   zhihu: { title: '', description: '', creationDeclaration: '内容无需标注', category: '', scheduleTime: '', tags: [] },
   csdn: { title: '', description: '', recommend: false, scheduleTime: '', tags: [] },
+  vivo: { title: '', description: '', vivoLocationName: '', vivoLocationData: null,
+    vivoDistribution: false, vivoDeclaration: '', vivoPrivacy: '公开',
+    vivoDownloadPermission: '允许', scheduleTime: '', tags: [] },
 })
 
 const accountOverrides = reactive({})
@@ -980,6 +1043,15 @@ function hasAccountOverride(accountId) {
 
 const form = reactive({})
 
+// 媒体字段由 currentEditTarget 直接管理（写入 commonConfig / platformOverrides / accountOverrides），
+// 不应该出现在 form 里。否则 watch(form) 的 diff 会把它们当成账号级差异写回 accountOverrides，
+// 其中的 null 会覆盖刚刚选好的视频/封面（详见 selectFromLibrary 后视频消失的 bug）。
+const MEDIA_KEYS = new Set([
+  'videoLandscape', 'videoPortrait',
+  'coverLandscape', 'coverPortrait',
+  'coverLandscape169', 'coverPortrait916',
+])
+
 function getMergedSettings() {
   const platformKey = selectedPlatform.value
   if (!platformKey) return {}
@@ -989,7 +1061,7 @@ function getMergedSettings() {
     const override = accountOverrides[selectedAccountId.value]
     if (override && Object.keys(override).length > 0) {
       for (const [key, value] of Object.entries(override)) {
-        if (MEDIA_OVERRIDE_KEYS.includes(key)) continue
+        if (MEDIA_KEYS.has(key)) continue
         merged[key] = cloneSettingValue(value)
       }
     }
@@ -1053,6 +1125,7 @@ watch(form, (newVal) => {
   if (selectedAccountId.value && isAccountOverrideEnabled(selectedAccountId.value)) {
     const diff = {}
     for (const key of Object.keys(newVal)) {
+      if (MEDIA_KEYS.has(key)) continue
       if (!isSameSettingValue(newVal[key], platform[key])) {
         diff[key] = cloneSettingValue(newVal[key])
       }
@@ -1610,8 +1683,37 @@ function clearVideo() {
 
 // ========== Cover Editor ==========
 
-function openCoverEditor(tab = 'landscape') {
-  coverEditorRef.value?.open(tab)
+// 当前激活 tab 对应的封面对象（按 orientation + ratio 路由到 4 个字段之一）
+const coverPortraitActiveCover = computed(() => {
+  const t = currentEditTarget.value
+  if (!t) return null
+  return coverPortraitActiveRatio.value === '9:16' ? t.coverPortrait916 : t.coverPortrait
+})
+const coverLandscapeActiveCover = computed(() => {
+  const t = currentEditTarget.value
+  if (!t) return null
+  return coverLandscapeActiveRatio.value === '16:9' ? t.coverLandscape169 : t.coverLandscape
+})
+
+// 移除/更新当前激活 tab 的封面（v-model 回调）
+function onPortraitCoverChange(v) {
+  const t = currentEditTarget.value
+  if (!t) return
+  if (coverPortraitActiveRatio.value === '9:16') t.coverPortrait916 = v
+  else t.coverPortrait = v
+}
+function onLandscapeCoverChange(v) {
+  const t = currentEditTarget.value
+  if (!t) return
+  if (coverLandscapeActiveRatio.value === '16:9') t.coverLandscape169 = v
+  else t.coverLandscape = v
+}
+
+function openCoverEditor(orientation = 'landscape', _ratio) {
+  coverEditOrientation.value = orientation
+  // 弹窗侧 CoverEditorDialog 不感知 ratio，保持原默认（orientation 主尺寸）打开；
+  // 用户进入弹窗后可自行切换 9:16 / 16:9 tab 编辑。
+  coverEditorRef.value?.open(orientation)
 }
 
 function triggerFrameExtraction(videoData, type) {
@@ -1774,6 +1876,8 @@ function serializePublishSnapshot() {
       videoPortrait: serializeMediaItem(commonConfig.videoPortrait),
       coverLandscape: serializeMediaItem(commonConfig.coverLandscape, ['_fromFrame']),
       coverPortrait: serializeMediaItem(commonConfig.coverPortrait, ['_fromFrame']),
+      coverLandscape169: serializeMediaItem(commonConfig.coverLandscape169, ['_fromFrame']),
+      coverPortrait916: serializeMediaItem(commonConfig.coverPortrait916, ['_fromFrame']),
     },
     platformConfigs: JSON.parse(JSON.stringify(platformConfigs)),
     platformOverrides: JSON.parse(JSON.stringify(platformOverrides)),
@@ -2005,6 +2109,16 @@ async function restoreDraft(draftId) {
         if (v.stored_path) v.url = getFileUrl(v.stored_path)
         commonConfig.coverPortrait = v
       }
+      if (dd.commonConfig.coverLandscape169) {
+        const v = dd.commonConfig.coverLandscape169
+        if (v.stored_path) v.url = getFileUrl(v.stored_path)
+        commonConfig.coverLandscape169 = v
+      }
+      if (dd.commonConfig.coverPortrait916) {
+        const v = dd.commonConfig.coverPortrait916
+        if (v.stored_path) v.url = getFileUrl(v.stored_path)
+        commonConfig.coverPortrait916 = v
+      }
     }
 
     if (dd.platformConfigs) {
@@ -2099,11 +2213,11 @@ async function restoreDraft(draftId) {
 
     currentDraftId.value = draftId
 
-    if (commonConfig.videoLandscape) {
-      triggerFrameExtraction(commonConfig.videoLandscape, 'landscape')
-    }
-    if (commonConfig.videoPortrait) {
-      triggerFrameExtraction(commonConfig.videoPortrait, 'portrait')
+    // 视频已不区分横竖版：只对实际可用的视频抽帧一次（横版优先，没有才竖版），
+    // 横竖版共用同一份帧缓存；避免对旧草稿里可能残留的失效 videoPortrait.id 重复抽帧触发"素材失效"提示。
+    const draftVideo = commonConfig.videoLandscape || commonConfig.videoPortrait
+    if (draftVideo) {
+      triggerFrameExtraction(draftVideo, 'landscape')
     }
 
     syncFormFromCurrentSettings()
@@ -2192,6 +2306,10 @@ async function publishAll() {
 
   // 2. 作品声明 + 标题 + 封面 per-account
   const accountsWithoutDeclaration = []
+  // B 站联动校验: 创作声明=转载 时转载来源必填
+  const accountsWithoutRepostSource = []
+  // 支付宝联动校验: 作者声明=内容为转载 时转载来源地址必填
+  const accountsWithoutReprintUrl = []
   const accountsWithoutTitle = []
   const accountsWithoutCover = []  // 格式: '账号X(平台Y)'
   const DECLARATION_PLATFORMS = {
@@ -2232,6 +2350,20 @@ async function publishAll() {
         }
       }
 
+      // 2a-bonus. B 站联动校验: 创作声明=转载 时, 转载来源必填
+      if (platformKey === 'bilibili' && merged.creationDeclaration === '内容为转载') {
+        if (!merged.biliRepostSource || !merged.biliRepostSource.trim()) {
+          accountsWithoutRepostSource.push(`${account.name}(${group.name})`)
+        }
+      }
+
+      // 2a-bonus-2. 支付宝联动校验: 作者声明=内容为转载 时, 转载来源地址必填
+      if (platformKey === 'alipay' && merged.authorStatement === '内容为转载') {
+        if (!merged.reprintUrl || !merged.reprintUrl.trim()) {
+          accountsWithoutReprintUrl.push(`${account.name}(${group.name})`)
+        }
+      }
+
       // 2b. 标题
       if (!merged.title || !merged.title.trim()) {
         accountsWithoutTitle.push(`${account.name}(${group.name})`)
@@ -2245,6 +2377,8 @@ async function publishAll() {
   }
 
   if (accountsWithoutDeclaration.length > 0) errors.push({ type: '作品声明', accounts: accountsWithoutDeclaration })
+  if (accountsWithoutRepostSource.length > 0) errors.push({ type: '转载来源(B站)', accounts: accountsWithoutRepostSource })
+  if (accountsWithoutReprintUrl.length > 0) errors.push({ type: '转载来源(支付宝)', accounts: accountsWithoutReprintUrl })
   if (accountsWithoutTitle.length > 0) errors.push({ type: '标题', accounts: accountsWithoutTitle })
   if (accountsWithoutCover.length > 0) errors.push({ type: '封面', accounts: accountsWithoutCover })
 
@@ -2563,6 +2697,9 @@ async function publishAll() {
     // 封面缺失校验已在 publishAll 顶部 collect-all 阶段完成，这里不再重复
     const thumbnailLandscapeMaterial = merged.coverLandscape || commonConfig.coverLandscape
     const thumbnailPortraitMaterial = merged.coverPortrait || commonConfig.coverPortrait
+    // 16:9 / 9:16 次尺寸封面(各平台按需选用,如知乎横版用 16:9)
+    const thumbnailLandscape169Material = merged.coverLandscape169 || commonConfig.coverLandscape169
+    const thumbnailPortrait916Material = merged.coverPortrait916 || commonConfig.coverPortrait916
 
     try {
       const tags = merged.tags || []
@@ -2579,6 +2716,9 @@ async function publishAll() {
         accountList: [account.filePath],
         thumbnailLandscape: thumbnailLandscapeMaterial ? thumbnailLandscapeMaterial.stored_path : '',
         thumbnailPortrait: thumbnailPortraitMaterial ? thumbnailPortraitMaterial.stored_path : '',
+        // 16:9 / 9:16 次尺寸封面(知乎等平台横版视频用 16:9)
+        thumbnailLandscape169: thumbnailLandscape169Material ? thumbnailLandscape169Material.stored_path : '',
+        thumbnailPortrait916: thumbnailPortrait916Material ? thumbnailPortrait916Material.stored_path : '',
         enableTimer: merged.scheduleTime ? 1 : 0,
         scheduleTime: merged.scheduleTime || '',
         videosPerDay: 1,
@@ -2607,8 +2747,9 @@ async function publishAll() {
         contentStatement: group.key === 'weibo' ? (merged.contentStatement || '') : '',
         // 微博「合集」单独透传(合集名称,后端切换开关+勾选对应项)
         weiboCollection: group.key === 'weibo' ? (merged.weiboCollectionName || '') : '',
-        // 支付宝「作者声明」+「合集」单独透传(其他平台忽略)
+        // 支付宝「作者声明」+「转载来源」+「合集」单独透传(其他平台忽略)
         authorStatement: merged.authorStatement || '',
+        reprintUrl: merged.reprintUrl || '',
         compilation: merged.compilation || '',
         // 今日头条特有字段
         enableGenerateImage: merged.enableGenerateImage ?? true,
@@ -2617,6 +2758,12 @@ async function publishAll() {
         extendLinkUrl: merged.extendLinkUrl || '',
         // CSDN 是否推荐
         recommend: merged.recommend || false,
+        // VIVO 平台特有字段(平台级)
+        vivoLocationName: merged.vivoLocationName || '',
+        vivoDistribution: merged.vivoDistribution || false,
+        vivoDeclaration: merged.vivoDeclaration || '',
+        vivoPrivacy: merged.vivoPrivacy || '公开',
+        vivoDownloadPermission: merged.vivoDownloadPermission || '允许',
         hotspot: merged.hotspotId || '',
         tag_type: merged.tagType || '',
         tag_value: merged.tagValue || '',
@@ -2628,6 +2775,11 @@ async function publishAll() {
         channelsCollectionName: merged.channelsCollectionName || '',
         // 视频号位置(账号级,空=不显示位置)
         channelsLocationName: merged.channelsLocationName || '',
+        // 视频号视频标注(平台级):tagName 文本,后端据此在发布页下拉里选中对应项
+        channelsMarkTag: merged.channelsMarkTag || '无需标注',
+        channelsShootDate: merged.channelsShootDate || '',
+        channelsShootRegion: merged.channelsShootRegion || [],
+        channelsRepostSource: merged.channelsRepostSource || '',
         // 小红书合集(账号级配置):collectionId 给后端定位,collectionName 兜底匹配
         collectionId: merged.collectionId || '',
         collectionName: merged.collectionName || '',
@@ -2642,6 +2794,8 @@ async function publishAll() {
         creationDeclaration: Array.isArray(merged.creationDeclaration)
           ? merged.creationDeclaration.join(',')
           : merged.creationDeclaration || '',
+        // B 站转载来源(创作声明=转载 时必填)
+        biliRepostSource: merged.biliRepostSource || '',
         riskWarning: merged.riskWarning || '',
         // 百家号补充声明
         supplementaryDeclaration: merged.supplementaryDeclaration || '',
@@ -2667,7 +2821,9 @@ async function publishAll() {
       if (group.key === 'toutiao') {
         console.log('[PublishCenter.publish] 今日头条参数: extendLink=' + publishData.extendLink + ' extendLinkUrl=' + publishData.extendLinkUrl + ' enableGenerateImage=' + publishData.enableGenerateImage + ' collection=' + publishData.collection)
       }
-      await http.post('/postVideo', publishData)
+      // 视频上传+发布可能很久（大文件/慢网/人机校验），设 4 小时超时
+      // 避免浏览器层提前断开导致「前端判失败但后端仍在跑」
+      await http.post('/postVideo', publishData, { timeout: 4 * 60 * 60 * 1000 })
       publishResults.value.push({
         label: account.name,
         status: 'success',
@@ -2838,13 +2994,13 @@ function formatSize(bytes) {
       // 一键发布: 保留项目渐变 + 阴影
       background: linear-gradient(135deg, #8b5cf6, #6366f1) !important;
       border: none !important;
-      box-shadow: 0 4px 20px rgba(139, 92, 246, 0.35) !important;
+      box-shadow: 0 4px 20px rgba($brand-start, 0.35) !important;
       font-weight: 700;
       letter-spacing: 0.04em;
       padding: 10px 24px !important;
 
       &:hover {
-        box-shadow: 0 6px 28px rgba(139, 92, 246, 0.5) !important;
+        box-shadow: 0 6px 28px rgba($brand-start, 0.5) !important;
         transform: translateY(-1px);
         opacity: 1 !important;
       }
@@ -2863,7 +3019,7 @@ function formatSize(bytes) {
     width: 6px;
   }
   &::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba($overlay-rgb, 0.1);
     border-radius: 3px;
   }
 }
@@ -2871,6 +3027,12 @@ function formatSize(bytes) {
 // ========== Config Section ==========
 .config-section {
   margin-bottom: 24px;
+
+  // 直接子级、且不在网格/标题组里的独立 setting-card（如通用标签卡片）
+  // 与下方 settings-grid 之间需要间距
+  > .setting-card {
+    margin-bottom: 12px;
+  }
 }
 
 .xhs-warning {
@@ -2933,7 +3095,7 @@ function formatSize(bytes) {
   border: 1px solid $border;
   border-radius: $radius-card;
   padding: 16px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba($overlay-rgb, 0.02);
   transition: $transition-base;
 
   &:hover {
@@ -2964,9 +3126,9 @@ function formatSize(bytes) {
   justify-content: center;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+  scrollbar-color: rgba($overlay-rgb, 0.08) transparent;
   &::-webkit-scrollbar { width: 4px; }
-  &::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  &::-webkit-scrollbar-thumb { background: rgba($overlay-rgb, 0.1); border-radius: 2px; }
 }
 
 .phone-panel-header {
@@ -3006,7 +3168,7 @@ function formatSize(bytes) {
 
   &:hover:not(.active) {
     color: $text-secondary;
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba($overlay-rgb, 0.03);
   }
   &.active {
     background: rgba($brand-start, 0.08);
@@ -3042,7 +3204,7 @@ function formatSize(bytes) {
   border: 3px solid #2a2a40;
   border-radius: 28px;
   padding: 8px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba($overlay-rgb, 0.05);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3100,7 +3262,7 @@ function formatSize(bytes) {
 .phone-home-bar {
   width: 40px;
   height: 4px;
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba($overlay-rgb, 0.15);
   border-radius: 2px;
   margin-top: 6px;
 }
@@ -3118,7 +3280,7 @@ function formatSize(bytes) {
   justify-content: space-between;
   margin: 0 16px;
   padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba($overlay-rgb, 0.03);
   border: 1px solid $border;
   border-radius: $radius-base;
 }
@@ -3152,7 +3314,7 @@ function formatSize(bytes) {
 
 // ----- Cover Section -----
 .cover-section {
-  background: rgba(255, 255, 255, 0.01);
+  background: rgba($overlay-rgb, 0.01);
   border-color: $border;
 }
 
@@ -3170,7 +3332,7 @@ function formatSize(bytes) {
   padding: 6px 14px;
   border: 1px solid $border;
   border-radius: $radius-sm;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba($overlay-rgb, 0.03);
   color: $text-secondary;
   font-size: 12px;
   cursor: pointer;
@@ -3248,7 +3410,7 @@ function formatSize(bytes) {
 
   :deep(.el-input__wrapper),
   :deep(.el-textarea__inner) {
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba($overlay-rgb, 0.03);
     border: 1px solid $border;
     border-radius: $radius-base;
     box-shadow: none;
@@ -3305,7 +3467,7 @@ function formatSize(bytes) {
 
     &:hover {
       color: $text-primary;
-      background: rgba(255, 255, 255, 0.02);
+      background: rgba($overlay-rgb, 0.02);
     }
   }
 
@@ -3361,7 +3523,7 @@ function formatSize(bytes) {
 
   :deep(.el-input__wrapper),
   :deep(.el-select .el-input__wrapper) {
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba($overlay-rgb, 0.03);
     border: 1px solid $border;
     border-radius: $radius-sm;
     box-shadow: none;
@@ -3406,7 +3568,7 @@ function formatSize(bytes) {
 
       &.on {
         font-weight: 600;
-        box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.3);
+        box-shadow: 0 0 0 1px rgba($brand-start, 0.3);
       }
     }
 

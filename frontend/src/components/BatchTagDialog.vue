@@ -272,7 +272,7 @@ watch(() => props.modelValue, (v) => {
   .batch-section {
     display: flex;
     flex-direction: column;
-    background: rgba(0, 0, 0, 0.25);
+    background: $bg-surface;
     border: 1px solid $border;
     border-radius: $radius-card;
     overflow: hidden;
@@ -292,7 +292,7 @@ watch(() => props.modelValue, (v) => {
     gap: 12px;
     padding: 12px 14px;
     border-bottom: 1px solid $border-light;
-    background: rgba(255, 255, 255, 0.02);
+    background: rgba($overlay-rgb, 0.02);
 
     .batch-section-title {
       font-size: 13px;
@@ -348,7 +348,7 @@ watch(() => props.modelValue, (v) => {
       border-color: $brand-start;
       box-shadow: 0 0 0 1px rgba($brand-start, 0.25);
 
-      .batch-account-name { color: #fff; font-weight: 600; }
+      .batch-account-name { color: $text-primary; font-weight: 600; }
     }
 
     &.disabled {
@@ -470,7 +470,7 @@ watch(() => props.modelValue, (v) => {
 
       .batch-tag-delete:hover {
         opacity: 1;
-        background: rgba(255, 255, 255, 0.2);
+        background: rgba($overlay-rgb, 0.2);
       }
     }
 
@@ -492,7 +492,7 @@ watch(() => props.modelValue, (v) => {
 
       &:hover {
         opacity: 1 !important;
-        background: rgba(239, 68, 68, 0.85);
+        background: rgba($danger-color, 0.85);
         color: #fff !important;
       }
     }

@@ -359,6 +359,7 @@ class AlipayPlatform(BasePlatform):
         - ``author_statement`` (*str*) — 作者声明(必填,6 选 1)
         - ``compilation`` (*str*)  — 合集名称(可选,精确匹配)
         - ``enableTimer`` (*bool*) / ``schedule_time_str`` (*str*) — 定时发布
+        - ``reprint_url`` (*str*)  — 转载来源地址(author_statement=内容为转载 时必填)
         """
         asyncio.run(self._upload_all(**kwargs))
         return True
@@ -390,6 +391,7 @@ class AlipayPlatform(BasePlatform):
         compilation = kwargs.get("compilation", "") or ""
         enable_timer = kwargs.get("enableTimer")
         schedule_time_str = kwargs.get("schedule_time_str", "") or ""
+        reprint_url = kwargs.get("reprint_url", "") or ""
 
         # 打印发布参数摘要
         logger.info("[发布参数] 标题: %s", title)
@@ -401,6 +403,7 @@ class AlipayPlatform(BasePlatform):
         logger.info("[发布参数] 竖版封面: %s", thumbnail_portrait_path or "无")
         logger.info("[发布参数] 视频格式: %s", video_format or "未指定")
         logger.info("[发布参数] 作者声明: %s", author_statement or "无")
+        logger.info("[发布参数] 转载来源: %s", reprint_url or "无")
         logger.info("[发布参数] 合集: %s", compilation or "无")
         logger.info("[发布策略] 发布策略: %s", "scheduled" if enable_timer and schedule_time_str else "immediate")
 
@@ -434,6 +437,7 @@ class AlipayPlatform(BasePlatform):
                         compilation=compilation,
                         enable_timer=enable_timer,
                         schedule_time_str=schedule_time_str,
+                        reprint_url=reprint_url,
                     )
 
         logger.info("=" * 60)
@@ -581,7 +585,7 @@ class AlipayPlatform(BasePlatform):
             finally:
                 await context.close()
         finally:
-            await browser.close()
+            await self.close_browser(browser, is_close_by_code=True)
 
     # ------------------------------------------------------------------
     # Helper (image): upload multiple images via hidden input[type=file]
@@ -931,6 +935,7 @@ class AlipayPlatform(BasePlatform):
         compilation: str = "",
         enable_timer=None,
         schedule_time_str: str = "",
+        reprint_url: str = "",
         debug_ctx: dict | None = None,
     ):
         """单个视频上传到单个账号的完整流程。"""
@@ -949,6 +954,7 @@ class AlipayPlatform(BasePlatform):
             "  compilation=%r\n"
             "  enable_timer=%r\n"
             "  schedule_time_str=%r\n"
+            "  reprint_url=%r\n"
             "========================",
             title, file_path, tags,
             os.path.basename(account_file),
@@ -960,6 +966,7 @@ class AlipayPlatform(BasePlatform):
             compilation,
             enable_timer,
             schedule_time_str,
+            reprint_url,
         )
         if debug_ctx is None:
             debug_ctx = {
@@ -1029,6 +1036,8 @@ class AlipayPlatform(BasePlatform):
                     author_statement,
                     debug_ctx=debug_ctx,
                 )
+                if author_statement.strip() == "内容为转载":
+                    await self._set_reprint_url(page, reprint_url)
 
                 # 8. 定时发布(可选)
                 if enable_timer and schedule_time_str:
@@ -1054,7 +1063,7 @@ class AlipayPlatform(BasePlatform):
             finally:
                 await context.close()
         finally:
-            await browser.close()
+            await self.close_browser(browser, is_close_by_code=True)
 
     # ------------------------------------------------------------------
     # Helper: upload the video file via hidden input[type=file]
@@ -1747,6 +1756,18 @@ class AlipayPlatform(BasePlatform):
     # Helper: set author statement (作者声明,必填)
     # ------------------------------------------------------------------
 
+    # 作者声明文本 → radio input value 映射(2026-07 实测 DOM)
+    # DOM: <input name="tagList" type="radio" value="..."> 6 选 1
+    # 注意:value 用后端业务码,不是中文,且各平台/版本会漂移,所以做双向兜底
+    _AUTHOR_STATEMENT_VALUE_MAP = {
+        "内容无需标注": "NO_STATEMENT",
+        "个人观点，仅供参考": "S_AT2",
+        "内容由AI生成": "A_AG3",
+        "内容虚构演绎，仅供娱乐": "S_AT1",
+        "内容含营销信息": "S_AT4",
+        "内容为转载": "S_AT3",
+    }
+
     @staticmethod
     async def _set_author_statement(page, statement: str, debug_ctx: dict | None = None):
         """选择作者声明(必填)。
@@ -1771,15 +1792,10 @@ class AlipayPlatform(BasePlatform):
             return
 
         statement = statement.strip()
-        statement_value_map = {
-            "内容无需标注": "NO_STATEMENT",
-            "个人观点，仅供参考": "S_AT2",
-            "内容由AI生成": "A_AG3",
-            "内容虚构演绎，仅供娱乐": "S_AT1",
-            "内容含营销信息": "S_AT4",
-            "内容为转载": "S_AT3",
-        }
-        target_value = statement_value_map.get(statement, statement)
+        target_value = AlipayPlatform._AUTHOR_STATEMENT_VALUE_MAP.get(
+            statement,
+            statement,
+        )
 
         # 1. 新版页面: radio 组
         radio = page.locator(
@@ -1912,6 +1928,59 @@ class AlipayPlatform(BasePlatform):
                 debug_ctx["author_summary"] = summary
             log_event(logger, "AUTHOR_SUMMARY", **summary)
             logger.warning("[上传视频] 旧版作者声明下拉也未命中「%s」: %s", statement, e)
+
+    # ------------------------------------------------------------------
+    # Helper: set reprint url (转载来源地址,作者声明=内容为转载 时必填)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _set_reprint_url(page, reprint_url: str):
+        """填写转载来源地址(作者声明=内容为转载 时下方出现的输入框)。"""
+        if not reprint_url or not reprint_url.strip():
+            logger.warning(
+                "[上传视频] 转载来源地址为空,作者声明=内容为转载 时必填,发布会失败"
+            )
+            return
+
+        url = reprint_url.strip()
+        input_loc = page.locator("input[id$='_reprintUrl']").first
+
+        try:
+            await input_loc.wait_for(state="visible", timeout=10000)
+        except Exception as e:
+            logger.warning("[上传视频] 按 id 后缀定位转载来源输入框失败: %s", e)
+            input_loc = page.locator(
+                "input[placeholder='请输入视频原地址']"
+            ).first
+            try:
+                await input_loc.wait_for(state="visible", timeout=5000)
+                logger.info("[上传视频] 转载来源输入框改用 placeholder 兜底定位成功")
+            except Exception as e2:
+                logger.warning("[上传视频] placeholder 兜底也失败: %s", e2)
+                try:
+                    all_inputs = await page.evaluate("""() => {
+                        return Array.from(document.querySelectorAll("input"))
+                            .filter(i => i.offsetParent !== null)
+                            .map(i => ({
+                                id: i.id || "",
+                                name: i.name || "",
+                                type: i.type || "",
+                                placeholder: i.placeholder || "",
+                            }));
+                    }""")
+                    logger.info("[上传视频] 当前页面所有可见 input: %s", all_inputs)
+                except Exception:
+                    pass
+                return
+
+        try:
+            await input_loc.fill("")
+            await input_loc.fill(url)
+            await input_loc.press("Tab")
+            await asyncio.sleep(0.3)
+            logger.info("[上传视频] 已填转载来源: %s", url)
+        except Exception as e:
+            logger.warning("[上传视频] 填写转载来源失败: %s", e)
 
     # ------------------------------------------------------------------
     # Helper: set schedule time (定时发布)

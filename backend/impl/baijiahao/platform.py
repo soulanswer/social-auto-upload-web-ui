@@ -293,6 +293,8 @@ class BaijiahaoPlatform(BasePlatform):
         start_days = kwargs.get("start_days", 0)
         thumbnail_landscape_path = kwargs.get("thumbnail_landscape_path")
         thumbnail_portrait_path = kwargs.get("thumbnail_portrait_path")
+        # 16:9 横版封面:第一个 cover-container 固定上传 16:9
+        thumbnail_landscape_169_path = kwargs.get("thumbnail_landscape_169_path", "") or ""
         desc = kwargs.get("desc", "")
         schedule_time_str = kwargs.get("schedule_time_str", "")
         creation_declaration = kwargs.get("creation_declaration", "")
@@ -308,6 +310,7 @@ class BaijiahaoPlatform(BasePlatform):
         logger.info("[发布参数] 定时发布: %s", enableTimer)
         logger.info("[发布参数] 横版封面: %s", thumbnail_landscape_path or "无")
         logger.info("[发布参数] 竖版封面: %s", thumbnail_portrait_path or "无")
+        logger.info("[发布参数] 横版16:9封面: %s", thumbnail_landscape_169_path or "无")
         logger.info("[发布参数] 创作声明: %s", creation_declaration or "无")
         logger.info("[发布参数] 补充声明: %s", supplementary_declaration or "无")
         logger.info("[发布策略] 发布策略: %s", "scheduled" if enableTimer and schedule_time_str else "immediate")
@@ -351,6 +354,7 @@ class BaijiahaoPlatform(BasePlatform):
                         account_file=cookie_path,
                         thumbnail_landscape_path=thumbnail_landscape_path,
                         thumbnail_portrait_path=thumbnail_portrait_path,
+                        thumbnail_landscape_169_path=thumbnail_landscape_169_path,
                         desc=desc,
                         creation_declaration=creation_declaration,
                         supplementary_declaration=supplementary_declaration,
@@ -374,6 +378,7 @@ class BaijiahaoPlatform(BasePlatform):
         account_file: str,
         thumbnail_landscape_path=None,
         thumbnail_portrait_path=None,
+        thumbnail_landscape_169_path="",
         desc="",
         creation_declaration="",
         supplementary_declaration="",
@@ -476,11 +481,20 @@ class BaijiahaoPlatform(BasePlatform):
                         await asyncio.sleep(3)
 
                 # Set custom covers
+                # 百家号封面对应关系固定, 不按视频方向:
+                #   第一个 cover-container  → 横屏 16:9 封面
+                #   第二个 cover-container  → 竖屏 3:4  封面
+                picked_landscape = thumbnail_landscape_169_path or thumbnail_landscape_path
+                picked_portrait = thumbnail_portrait_path
+                logger.info(
+                    "[设置封面] 横版16:9封面=%s, 竖版3:4封面=%s",
+                    picked_landscape or "无", picked_portrait or "无",
+                )
                 logger.info("[设置封面] 开始设置视频封面...")
                 await self._set_cover(
                     page,
-                    thumbnail_landscape_path,
-                    thumbnail_portrait_path,
+                    picked_landscape,
+                    picked_portrait,
                 )
                 logger.info("[设置封面] 封面设置完成")
 
@@ -552,7 +566,7 @@ class BaijiahaoPlatform(BasePlatform):
             finally:
                 await context.close()
         finally:
-            await browser.close()
+            await self.close_browser(browser, is_close_by_code=True)
 
     # ------------------------------------------------------------------
     # Helper: 前置校验 - 描述+标签总字符 ≤50(emoji 按 3 算),最多 10 标签

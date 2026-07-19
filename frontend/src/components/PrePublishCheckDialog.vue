@@ -195,7 +195,7 @@ function open(accounts) {
       logo: p?.logo || null,
       letter: p?.letter || '?',
       color: p?.color || '#999',
-      bgColor: p?.bgColor || 'rgba(255,255,255,0.06)',
+      bgColor: p?.bgColor || 'var(--surface-hover)',
       cssClass: p?.cssClass || '',
       checkStatus: 'pending',  // pending / checked
       valid: false,
@@ -218,7 +218,7 @@ function platformTypeToKey(type) {
   const map = {
     1: 'xiaohongshu', 2: 'channels', 3: 'douyin', 4: 'kuaishou',
     5: 'bilibili', 6: 'baijiahao', 7: 'tiktok', 8: 'youtube',
-    9: 'tencent_video', 10: 'iqiyi', 11: 'weibo', 12: 'alipay', 13: 'toutiao', 14: 'zhihu', 15: 'csdn',
+    9: 'tencent_video', 10: 'iqiyi', 11: 'weibo', 12: 'alipay', 13: 'toutiao', 14: 'zhihu', 15: 'csdn', 16: 'vivo',
   }
   return map[type] || ''
 }
@@ -426,9 +426,9 @@ defineExpose({ open })
   }
 
   &.is-invalid {
-    border-color: rgba(245, 108, 108, 0.3);
+    border-color: rgba($danger-color, 0.3);
     border-left: 3px solid #f56c6c;
-    background: rgba(245, 108, 108, 0.04);
+    background: rgba($danger-color, 0.04);
   }
 }
 
@@ -517,8 +517,8 @@ defineExpose({ open })
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  background: rgba(245, 108, 108, 0.06);
-  border: 1px solid rgba(245, 108, 108, 0.2);
+  background: rgba($danger-color, 0.06);
+  border: 1px solid rgba($danger-color, 0.2);
   border-left: 3px solid #f56c6c;
   border-radius: $radius-sm;
   transition: all 0.2s;
@@ -536,7 +536,7 @@ defineExpose({ open })
   }
 
   &.is-fail {
-    border-color: rgba(245, 108, 108, 0.3);
+    border-color: rgba($danger-color, 0.3);
   }
 }
 
@@ -624,24 +624,24 @@ defineExpose({ open })
   }
 
   &.action-cancel {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba($overlay-rgb, 0.04);
     border-color: $border;
     color: $text-muted;
 
     &:hover {
-      background: rgba(245, 108, 108, 0.1);
-      border-color: rgba(245, 108, 108, 0.3);
+      background: rgba($danger-color, 0.1);
+      border-color: rgba($danger-color, 0.3);
       color: #f56c6c;
     }
   }
 
   &.action-retry {
-    background: rgba(245, 108, 108, 0.08);
-    border-color: rgba(245, 108, 108, 0.3);
+    background: rgba($danger-color, 0.08);
+    border-color: rgba($danger-color, 0.3);
     color: #f56c6c;
 
     &:hover {
-      background: rgba(245, 108, 108, 0.16);
+      background: rgba($danger-color, 0.16);
     }
   }
 }

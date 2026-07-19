@@ -85,13 +85,12 @@ class DouyinPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     async def login(self, id: str, status_queue: Queue, account_id=None) -> None:
-        """Perform Douyin login via QR code scan.
+        """Perform Douyin login.
 
-        Opens ``https://creator.douyin.com/``, extracts the QR image from
-        ``get_by_role("img", name="二维码")``, sends the image URL to
-        *status_queue*, then waits for the page to navigate away (indicating
-        the user scanned the code).  On success, scrapes the user profile and
-        saves the login result.
+        直接打开 ``https://creator.douyin.com/``，由用户在浏览器里扫码完成
+        登录。后端通过监听主框架 URL 变化判断登录成功（不设超时，浏览器由
+        用户自己关），随后抓取用户资料并落库。不再提取/推送二维码——前端
+        只等 ``status:200``。
         """
         url_changed_event = asyncio.Event()
 
@@ -107,12 +106,6 @@ class DouyinPlatform(BasePlatform):
                 page = await context.new_page()
                 await page.goto("https://creator.douyin.com/")
                 original_url = page.url
-
-                # Extract QR code image
-                img_locator = page.get_by_role("img", name="二维码")
-                src = await img_locator.get_attribute("src")
-                logger.info("QR image src: %s", src)
-                status_queue.put(src)
 
                 # Monitor URL change via framenavigated
                 page.on(
@@ -643,7 +636,7 @@ class DouyinPlatform(BasePlatform):
             finally:
                 await context.close()
         finally:
-            await browser.close()
+            await self.close_browser(browser, is_close_by_code=True)
 
     # ------------------------------------------------------------------
     # Helper: 前置校验 - 话题总数 ≤ 5(描述 #xxx + 标签 + 官方活动)
@@ -732,18 +725,101 @@ class DouyinPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _set_schedule_time_legacy_unused(page, publish_date):
-        label_element = page.locator("[class^='radio']:has-text('定时发布')")
-        await label_element.click()
-        await asyncio.sleep(1)
+    async def _set_schedule_time(page, publish_date):
+        # 抖音使用字节 Semi Design 的 dateTime 选择器：日期与时间分属两个视图，
+        # 由 .semi-datepicker-switch 切换；dateTime 模式需手动确认(needConfirm)。
+        # 仅往输入框敲文本+回车只能可靠设置日期，时间(HH:MM)会被丢弃，
+        # 因此必须切到时间滚轮(.semi-datepicker-switch-time)分别选时/分。
+        if isinstance(publish_date, int) and publish_date == 0:
+            return
 
-        publish_date_hour = publish_date.strftime("%Y-%m-%d %H:%M")
-        await asyncio.sleep(1)
-        await page.locator('.semi-input[placeholder="日期和时间"]').click()
-        # 清空后输入(跨平台:Mac 用 Cmd+A,其他用 Ctrl+A)
-        await clear_and_type(page, str(publish_date_hour))
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(1)
+        dt = publish_date
+        expected = dt.strftime("%Y-%m-%d %H:%M")
+        logger.info("[定时发布] 开始设置定时发布时间: %s", expected)
+        try:
+            # 1. 选择「定时发布」单选项
+            await page.locator("[class^='radio']:has-text('定时发布')").click()
+            await asyncio.sleep(1)
+
+            # 2. 打开日期时间选择面板
+            await page.locator('.semi-input[placeholder="日期和时间"]').click()
+            await asyncio.sleep(1)
+
+            # 3. 选择日期：点击对应日期格(title=YYYY-MM-DD，排除禁用日期)
+            iso_date = dt.strftime("%Y-%m-%d")
+            day_cell = page.locator(
+                f'.semi-datepicker-day:not(.semi-datepicker-day-disabled)[title="{iso_date}"]'
+            )
+            if await day_cell.count():
+                await day_cell.first.click()
+                logger.info("[定时发布] 日期已选择: %s", iso_date)
+            else:
+                logger.warning("[定时发布] 未找到可选日期 %s，跳过日期选择", iso_date)
+            await asyncio.sleep(0.5)
+
+            # 4. 切换到时间选择滚轮
+            switch_time = page.locator('.semi-datepicker-switch-time')
+            if await switch_time.count():
+                await switch_time.first.click()
+                logger.info("[定时发布] 已切换到时间选择滚轮")
+                await asyncio.sleep(1)
+            else:
+                logger.warning("[定时发布] 未找到时间切换开关 .semi-datepicker-switch-time")
+
+            # 5. 选择小时(滚轮内 li 文本为纯数字；选中项带「时」后缀，has_text 均可命中)
+            hour = dt.strftime("%H")
+            hour_item = (
+                page.locator('.semi-scrolllist-item-wheel.undefined-list-hour li')
+                .filter(has_text=hour)
+            )
+            if await hour_item.count():
+                await hour_item.first.click()
+                logger.info("[定时发布] 小时已选择: %s", hour)
+            else:
+                logger.warning("[定时发布] 未找到小时项 %s", hour)
+            await asyncio.sleep(0.4)
+
+            # 6. 选择分钟
+            minute = dt.strftime("%M")
+            minute_item = (
+                page.locator('.semi-scrolllist-item-wheel.undefined-list-minute li')
+                .filter(has_text=minute)
+            )
+            if await minute_item.count():
+                await minute_item.first.click()
+                logger.info("[定时发布] 分钟已选择: %s", minute)
+            else:
+                logger.warning("[定时发布] 未找到分钟项 %s", minute)
+            await asyncio.sleep(0.4)
+
+            # 7. 确认(dateTime 模式需点「确定」；找不到则回车兜底)
+            confirmed = False
+            confirm_btn = page.locator('.semi-popover button:has-text("确定")')
+            if await confirm_btn.count():
+                await confirm_btn.first.click()
+                confirmed = True
+                logger.info("[定时发布] 已点击「确定」确认")
+            if not confirmed:
+                await page.keyboard.press("Enter")
+                logger.info("[定时发布] 未找到确认按钮，已按 Enter 兜底")
+            await asyncio.sleep(1)
+
+            # 8. 校验输入框最终值，便于排查时间是否真的生效
+            try:
+                final_val = await page.input_value(
+                    '.semi-input[placeholder="日期和时间"]'
+                )
+                if final_val and dt.strftime("%H:%M") in final_val:
+                    logger.info("[定时发布] 校验成功，输入框值: %s", final_val)
+                else:
+                    logger.warning(
+                        "[定时发布] 校验异常，输入框值: %s（期望含 %s）",
+                        final_val, dt.strftime("%H:%M"),
+                    )
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.error("[定时发布] 设置定时发布时间失败: %s", exc)
 
     # ------------------------------------------------------------------
     # Helper: set product link (购物车)
@@ -1406,7 +1482,7 @@ class DouyinPlatform(BasePlatform):
             finally:
                 await context.close()
         finally:
-            await browser.close()
+            await self.close_browser(browser, is_close_by_code=True)
 
     # ------------------------------------------------------------------
     # Helper: set image cover

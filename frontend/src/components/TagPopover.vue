@@ -3,7 +3,7 @@
     :visible="visible"
     placement="bottom"
     :width="240"
-    @update:visible="$emit('update:visible', $event)"
+    @update:visible="onVisibleUpdate"
   >
     <template #reference>
       <slot />
@@ -15,6 +15,8 @@
           size="small"
           placeholder="搜索或创建标签..."
           clearable
+          @compositionstart="composing = true"
+          @compositionend="composing = false"
           @keyup.enter="handleCreate"
         />
       </div>
@@ -57,6 +59,13 @@ const emit = defineEmits(['update:visible', 'changed'])
 
 const accountStore = useAccountStore()
 const keyword = ref('')
+// IME 组合输入中（如中文选词期间）。为 true 时屏蔽 popover 的关闭，避免候选词点击误触发 update:visible(false)
+const composing = ref(false)
+
+function onVisibleUpdate(val) {
+  if (!val && composing.value) return
+  emit('update:visible', val)
+}
 
 const filteredTags = computed(() => {
   if (!keyword.value) return accountStore.allTags
@@ -101,6 +110,7 @@ async function handleCreate() {
 </script>
 
 <style lang="scss" scoped>
+@use '@/styles/variables.scss' as *;
 .tag-popover {
   .tag-popover-search { margin-bottom: 8px; }
   .tag-popover-list { max-height: 200px; overflow-y: auto; }
@@ -112,7 +122,7 @@ async function handleCreate() {
     border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
-    &:hover { background: rgba(255,255,255,0.06); }
+    &:hover { background: rgba($overlay-rgb, 0.06); }
     .tag-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .tag-name { flex: 1; }
     .tag-check { color: #8b5cf6; }
@@ -126,8 +136,8 @@ async function handleCreate() {
     color: #8b5cf6;
     cursor: pointer;
     border-radius: 6px;
-    &:hover { background: rgba(139,92,246,0.1); }
+    &:hover { background: rgba($brand-start, 0.1); }
   }
-  .tag-popover-empty { text-align: center; padding: 12px; font-size: 13px; color: #64748b; }
+  .tag-popover-empty { text-align: center; padding: 12px; font-size: 13px; color: $text-muted; }
 }
 </style>

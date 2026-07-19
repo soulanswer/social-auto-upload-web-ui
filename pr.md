@@ -1,138 +1,153 @@
-# 发布历史重设计 + 一键填写封面修复 — v0.6.0
+# PR: feat(v1.2.2) VIVO 平台接入 + 封面系统重构 + 10 平台稳定性修复
 
 ## 概述
 
-将发布历史从 4 张零散表（`publish_tasks` / `publish_logs` / `image_publish_tasks` / `image_publish_logs`）合并为统一的主-子表结构（`publish_batches` + `publish_details`），并把 `PublishHistory.vue` 从平铺表格重写为按"批次"分组的卡片式 UI。同步修了一键填写对话框的封面图 bug、账号不复原 bug、表单没填上的 bug，并把 S3 视频下载缓存纳入了系统设置的"缓存清理"功能。
+本次发布 16 个平台版 VIVO 内容创作平台正式接入，封面系统全面重构（4:3/16:9/3:4/9:16 多比例可设，不再污染素材库），账号运营数据（粉丝/获赞/关注）字段落地，并修复抖音/视频号/支付宝/B 站/百家号/快手/知乎/腾讯视频/头条 9 个平台的关键 Bug。
 
 ---
 
 ## PR 类型
 
-- [x] Breaking change（schema 重构）
-- [x] 新功能（卡片 UI、S3 缓存清理）
-- [x] Bug 修复（封面 bug、账号复原、表单填入、get_stats 500、测试隔离）
-- [ ] 文档（changelog、pr.md、spec/plan）
+- [x] 新功能（VIVO 平台接入、账号运营数据、封面系统重构、新增赞助页面）
+- [x] Bug 修复（10 个平台 bug + 发布历史封面图 + 个性化选视频 bug + 浏览器关闭智能识别）
+- [x] 工程效率（util/_logger 修复 csdn/vivo 日志路由历史 bug）
+- [x] 文档（v1.2.2 更新日志）
 
 ---
 
 ## 核心变更
 
-### 1. 数据模型（`backend/init_db.py`）
+### 1. VIVO 内容创作平台接入（`backend/impl/vivo/`）
 
-- **删除**：`publish_tasks` / `publish_logs` / `image_publish_tasks` / `image_publish_logs` 共 4 张旧表
-- **新增**：
-  - `publish_batches`（主表）：每次"发布"=1 行，存标题/描述/封面素材 ID/视频素材 ID/图文素材 ID 集/整体状态/账号数
-  - `publish_details`（明细表）：每账号 1 行，FK→`publish_batches.id`，存平台/账号/状态/错误信息/`publish_url`（预留字段）
-- **索引**：`publish_batches.created_at`、`publish_batches.status`、`publish_details.batch_id`、`publish_details.status`、`publish_details.platform`
-- 不做数据迁移（功能尚未正式使用）
+新增 `VivoPlatform`（platform_id=16），继承 `BasePlatform`，注册到 `registry.py`：
 
-### 2. 后端读取端点
+- **创作者中心**：`https://www.kaixinkan.com.cn/#/home`
+- **视频发布**：`https://www.kaixinkan.com.cn/#/content/uploads`
+- **规范**：视频大小≤2G、时长≤90min、描述≤500字
+- **完整发布流程**：
+  1. 扫码登录（可见浏览器 + 轮询 `.user-info-area` 出现判定成功）
+  2. 资料同步（昵称/头像/粉丝/获赞，关注固定 0）
+  3. 上传视频文件（`input[type=file]`，轮询 `.success-text:has-text("上传成功")`，**4 小时超时**）
+  4. 描述+标签（contenteditable 逐字符输入；`#xxx` 末尾空格激活话题）
+  5. 3:4 竖版封面（点编辑封面 → 切上传 tab → 上传 → 处理裁剪 → div 确定）
+  6. 位置（`.sel-position-module` → 输入关键词 → 解析 `.position-list li`）
+  7. 作品同步（`label.el-checkbox` 文案定位勾选）
+  8. 自主声明（`div.el-select-dropdown__item` 文案匹配）
+  9. 谁可以看 / 下载权限（radio by label + option text）
+  10. 定时发布（直接 fill 两个文本框：yyyy-MM-dd + HH:mm）
+  11. 提交 → URL 跳转判定成功
+- **严格遵守**：所有 selector 用产品语义 class（`.user-info-area` / `.cover-photo-img` / `.sel-position-module` 等），**禁用 `data-v-xxx` 随机字符串**
 
-- `GET /api/v2/history`：按 `publish_batches` 分组返回，每项含 `items[]` 明细子数组；支持 `type` / `status` / `timeRange` 过滤 + 分页
-- `GET /api/v2/publish-templates`：读 `publish_batches` 中至少部分成功的批次，按 `account_configs` 非空过滤；`thumbnail_path` 解析为 `materials.stored_path`（commit `4152de1` 修复）
-- `GET /api/v2/tasks`（TaskCenter 用）：从 `publish_details` 读，含 `batch_id` 关联 + `batch_title` 字段
-- `GET /api/materials/{id}`（新增，供一键填写封面修复用）
-- `GET /api/v2/stats` 修复（commit `b4d16e6`）：原来 8 个查询都引用旧表，已改读新表，stat cards 恢复显示
+### 2. 账号运营数据（粉丝 / 获赞 / 关注）
 
-### 3. 后端写入端点
+- `user_info` 表新增 `fans/likes/follows` 三列（幂等迁移，默认 0）
+- `BasePlatform.sync_profile` 约定支持 5 元组返回（向后兼容 2 元组）：
+  - 2 元组 `(name, avatar)` — 旧平台
+  - 5 元组 `(name, avatar, fans, likes, follows)` — 新平台（如 VIVO）
+- `save_login_result` / `syncProfile` 路由 / `setAccounts` store 全部按元组长度兼容解包写库
+- 前端账号卡片底部展示「粉丝 N · 获赞 N · 关注 N」，其余平台字段保留为 0 待后续版本接入
 
-- `POST /postVideo`：`_before_publish` 插 1 batch + 1 detail；`_after_publish` 聚合 batch 状态
-- `POST /api/image-publish/publish`：单账号 + `batchId` 入参；不再插 `image_publish_tasks`/`image_publish_logs`
-- `POST /api/image-publish/drafts/execute-publish`：同步新表
-- `task_queue.py`：`PublishTask` 加 `batch_id` 字段；`_insert_db` / `_update_db` 重写
-- 全部接受新参数：`batchId` / `videoMaterialId` / `landscapeCoverMaterialId` / `portraitCoverMaterialId` / `accountId`
-- `thumbnailLandscape` / `thumbnailPortrait` 存进 `account_configs` JSON（commit `49bd6de` 修复），供 `_resolve_cover_url` 在 material_id 缺失时回退
+### 3. VIVO 位置搜索自动化（`/api/vivo/search-position`）
 
-### 4. 前端改造
+- 仿 `xiaohongshu_bp.py` 模式：浏览器自动化打开 VIVO 发布页 → 上传测试视频触发表单 → 在 `.sel-position-module` 输入关键词 → 解析 `.position-list li` 的 `.position-name` + `.position-info`
+- 前端 `VivoPositionSelect.vue` 复用模式与小红书 POI 一致，空值即不显示位置
 
-- **`PublishHistory.vue` 完全重写**：从 `<el-table>` 改为卡片列表（封面+标题+描述+账号汇总+状态徽标+时间），点击展开内联明细（账号/平台/耗时/状态/错误/publish_url）；stat cards / filter / pagination 全部保留，加了 `typeFilter`（视频/图文/全部）
-- **`PublishCenter.vue`**：`publishAll()` 入口生成 UUID 作为 `batchId`；每次 `/postVideo` 调用带上 `batchId` + 3 个素材 ID + `accountId`
-- **`ImagePublish.vue` + 3 个 panel + `useChannelForm.js`**：循环 N 个账号，每次调 `/api/image-publish/publish`（单账号 + 共享 `batchId`）
-- **`OneClickFillDialog.vue`**：封面 URL 改为走 `/api/materials/file/{path}`（之前是 `/uploads/...` 不通）
-- **`TaskCenter.vue`**：字段名 `title` → `batch_title` 适配
-- **`api/v2.js`**：`historyApi` 注释更新
-- **`platforms.js`**：加 `platformNameToKey` 映射（一键填写按平台填 platformConfigs 时用）
-- **`Settings.vue`**：缓存管理新增"S3 视频缓存"项
+### 4. 封面系统全面重构
 
-### 5. 一键填写 bug 修复（四个串联 bug）
+- **封面不再保存到素材库**（避免占用不必要资源），改为临时处理
+- 4:3 / 16:9 / 3:4 / 9:16 四种比例可按视频方向自动选择
+- 头条 / 腾讯视频 / 知乎 / 视频号 / 快手 已按方向自动选择新尺寸
+- CSDN 固定横版、百家号固定横竖各一
+- 爱奇艺封面弹窗新增 16:9 横封面 tab
+- 封面弹窗尺寸 tab 改造 + 布局重设计 + 亮色样式修复
+- 封面裁剪改为两个独立面板，确认时统一校验裁剪结果
 
-- **封面图**：`OneClickFillDialog.vue` 调用 `/api/materials/list?id=X`，但 list 端点不识别 `id` 参数（静默忽略），导致图文物料封面错乱。改为调用新的 `GET /api/materials/{id}` 端点
-- **账号复原**：原 `handleOneClickFill` 只填 `platformConfigs`，不动 `publishAccountIds`。现在按模板 `channels` 自动勾选对应平台下所有账号
-- **表单填入**：原代码把 `record.account_configs` 当成平台嵌套 dict 处理（实际是单 detail 扁平配置），字符串字段被 `typeof === 'object'` 过滤掉，导致表单一直没填。改为按 `channels` 逐个平台应用单份配置
-- **中英文 key 不匹配**：`platformConfigs` 用英文 key（`douyin`），`channels[].platform` 是中文名（`抖音`），写入了不存在的 key。修复：加 `platformNameToKey` 映射
+### 5. 10 个平台稳定性修复
 
-### 6. S3 视频缓存管理
+| 平台 | 修复内容 |
+|---|---|
+| 抖音 | 定时发布时间丢失 → Semi 时间滚轮选时/分 |
+| 视频号 | 封面遍历所有入口 + 横版封面 popover 处理 |
+| 支付宝 | 作者声明 radio 改点 label（antd5 受控组件）；新增转载来源联动 |
+| B 站 | 创作声明=转载时新增必填转载来源 |
+| 百家号 | 固定 16:9 横版 + 3:4 竖版 |
+| 快手 | 视频封面前按方向选裁剪比例 |
+| 知乎 | 横版视频优先 16:9 封面 |
+| 腾讯视频 | 封面按方向 + UploadNotify 4h 超时 + 永远等的 formTitle 移除 |
+| 头条 | 封面按方向选 16:9/9:16 + 二次确认弹窗精确点确定按钮 |
+| 全平台 | 浏览器关闭智能识别（disarm 标志），手动关浏览器不再卡死 |
 
-- `_download_s3_to_cache` 在帧提取前把 S3 视频下载到 `data/s3_video_cache/`（ffmpeg 需要本地文件）
-- 308MB 起步且持续累积的运行时缓存
-- 修复：
-  - 加进 `.gitignore`（`data/s3_video_cache/`）
-  - 系统设置 → 缓存管理 → 新增"S3 视频缓存"清理项（`/api/system-info` + `/api/clear-cache` 新增 target）
+### 6. 体验优化
 
-### 7. 测试改造
+- 亮色模式账号选中字体改用品牌紫，亮色下不再发白看不清
+- 勾选账号个性化后首次从素材库选视频不显示（`getMergedSettings` filter 漏过滤 null 修复）
+- 发布历史封面图显示修复（`_resolve_cover_from_path` 修复 `covers/` 前缀路径）
+- 新增赞助作者页面（侧边栏底部品牌色菜单 + 支付宝/微信收款码 + 顶部徽章心跳红点）
 
-- 7 个测试文件全部 TDD：写失败测试 → 改代码 → 通过
-- 修复 2 个测试文件的隔离 bug（模块级 `os.environ` 污染）
-- 修复 4 个 `_record_publish` 旧签名测试
+### 7. 工程效率
 
-### 8. 杂项
-
-- 版本号 `0.5.0` → `0.6.0`（`versions` 文件）
-- 删除 `/api/image-publish/history` 端点（前端的图片历史统一走 `/api/v2/history?type=image`）
-- `start.bat` 换行符统一为 CRLF
-- 新增 `changelog/20260609.html`（v0.6.0 更新日志，7 张幻灯片）
+- `util/_logger.CHANNELS` 补全 csdn + vivo，修复日志路由缺失历史 bug（csdn 平台之前的日志也丢了）
 
 ---
 
-## 文件变更统计
+## 涉及文件
 
 ```
-39 files changed, 8982 insertions(+), 1491 deletions(-)
+后端新增(3 个):
+  backend/impl/vivo/__init__.py
+  backend/impl/vivo/platform.py            (540 行)
+  backend/blueprints/vivo_bp.py            (167 行)
+
+后端修改(10 个):
+  backend/init_db.py                       user_info 新增 3 列迁移
+  backend/impl/base_platform.py            sync_profile 文档说明 5 元组
+  backend/impl/_utils.py                   scrape_vivo_profile + save_login_result 兼容
+  backend/impl/registry.py                 注册 VivoPlatform
+  backend/util/_logger.py                  CHANNELS 补 csdn+vivo
+  backend/util/video_limits.py             vivo 校验规则
+  backend/app.py                           PLATFORM_MAP + blueprint + publish kwargs
+  backend/ext_api/__init__.py              硬编码字典补 vivo (修草稿箱显示)
+  backend/blueprints/image_publish_bp.py   platform_map 补 vivo
+
+前端新增(3 个):
+  frontend/src/api/vivo.js
+  frontend/src/components/vivo/PositionSelect.vue
+  frontend/src/assets/logos/vivo.svg       (3.4KB, Vite 内联到 bundle)
+
+前端修改(6 个):
+  frontend/src/config/platforms.js         VIVO 配置
+  frontend/src/config/videoLimits.js      vivo 镜像规则
+  frontend/src/stores/account.js           索引偏移适配
+  frontend/src/views/AccountManagement.vue 账号卡片显示粉丝/获赞/关注
+  frontend/src/views/PublishCenter.vue     集成 + poiSelect 分流
+  frontend/src/components/PrePublishCheckDialog.vue  platformTypeToKey
+
+文档 + 资源:
+  versions                                 1.2.1 → 1.2.2
+  changelog/20260719.html                  v1.2.2 更新日志页面
+  frontend/src/assets/alipay.jpg + weixin.jpg  赞助页面收款码
 ```
 
-**主要文件**：
-- 后端：`init_db.py` (-76/+48)、`app.py` (-24/+83)、`blueprints/image_publish_bp.py` (-121/+91)、`blueprints/materials_bp.py` (+17)、`ext_api/__init__.py`（多处）、`ext_api/task_queue.py`、`routes/frames.py` (+26)
-- 前端：`PublishHistory.vue`（完全重写，683 行）、`PublishCenter.vue`、`ImagePublish.vue`、`OneClickFillDialog.vue`、`TaskCenter.vue`、`Settings.vue`、`platforms.js`、`useChannelForm.js`、3 个 image panel
-- 测试：7 个测试文件
-- 文档：`specs/2026-06-08-publish-history-redesign-design.md`、`plans/2026-06-08-publish-history-redesign.md`、`changelog/20260609.html`
-- 配置：`.gitignore`、`versions`、`start.bat`
+---
+
+## 验证
+
+- ✅ 后端 Python 语法 OK
+- ✅ VIVO 平台通过 registry 成功加载（platform_id=16）
+- ✅ scrape_vivo_profile / PLATFORM_SYNC_URLS / VIDEO_LIMITS 注册正确
+- ✅ 数据库迁移成功（3 列添加，幂等无报错）
+- ✅ 前端 `npm run build` 成功（18.82s）
+- ✅ vivo.svg 内联为 data URI 进入 bundle
+- ✅ 实际登录/扫码流程验证通过
+- ✅ 实际视频发布流程（dry_run 模式）验证通过：描述+标签+封面+位置+作品同步+自主声明+定时发布 全部正常填写
+- ✅ 草稿箱显示「VIVO」+ vivo 图标（修复「平台16」问题）
+
+## 兼容性
+
+- ✅ 旧平台 sync_profile 返回 2 元组仍正常工作（save_login_result / syncProfile 路由按元组长度兼容解包）
+- ✅ 账号 store.setAccounts 按新列顺序索引映射（id/type/filePath/userName/status/avatar/fans/likes/follows/tags），向后兼容
+- ✅ logger CHANNELS 补全后，csdn 平台日志也恢复正常（顺带修复历史 bug）
 
 ---
 
-## 测试
-
-- 后端：40/40 通过
-- 前端构建：0 error
-- 端到端 curl 冒烟：5/5 关键端点正常
-
----
-
-## 测试计划
-
-合并后人工验证：
-- [ ] PublishCenter 选 2 个账号发布一次 → DB 有 1 batch + 2 detail
-- [ ] PublishHistory 显示 1 张卡片（不是 2 张），展开后看到 2 行明细
-- [ ] ImagePublish 选 2 个图文账号发布 → DB 有 1 batch + 2 detail
-- [ ] PublishHistory `typeFilter` 切换"视频/图文/全部"过滤正常
-- [ ] 视频一键填写：封面图正常显示（`/api/materials/file/...` 走得通）
-- [ ] 图文一键填写：封面图正常显示（封面 bug 已修）
-- [ ] 一键填写选中后：账号被自动勾选 + 平台表单字段被自动填入
-- [ ] TaskCenter 显示任务列表，含 `batch_title` 列
-- [ ] 系统设置 → 缓存管理：3 项缓存都有正确的 count + size + 清理按钮
-
----
-
-## 注意事项
-
-- 已有 legacy 数据（如果有）需要走一次性迁移脚本。本分支内不做迁移（功能未正式使用 + 用户明确要求"不需要迁移历史表"）
-- `create_task` POST 端点仍写旧 `publish_tasks` 表。当前没有前端调用，TaskCenter 只用 GET；如需启用 POST 再补迁移
-- 后端 `_resolve_cover_url` 当前每个 batch 单独查 materials 表（N+1）。当前 page size ≤ 20 性能 OK，未来如需优化可批量查询
-- `cover_url` 当前返回相对路径（`/api/materials/file/...`），通过 Vite dev proxy 转发。Tauri 打包后需调整（如用绝对 URL 或相对 origin 处理）
-
----
-
-## 相关链接
-
-- **设计 spec**：`docs/superpowers/specs/2026-06-08-publish-history-redesign-design.md`
-- **实施计划**：`docs/superpowers/plans/2026-06-08-publish-history-redesign.md`
-- **更新日志**：`changelog/20260609.html`
+**37 个提交 · 104 文件 · 9774 行新增**

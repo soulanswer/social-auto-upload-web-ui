@@ -30,15 +30,35 @@
         </button>
       </div>
       <div class="action-buttons">
-        <el-button class="btn-refresh" @click="fetchMaterials" :loading="false">
-          <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
-          <span v-if="isRefreshing">刷新中</span>
-          <span v-else>刷新</span>
-        </el-button>
-        <el-button type="primary" class="btn-upload" @click="handleUploadMaterial">
-          <el-icon><Upload /></el-icon>
-          <span>上传素材</span>
-        </el-button>
+        <!-- 批量操作条（选择态） -->
+        <template v-if="selectMode">
+          <span class="batch-count">已选 {{ selectedCount }} 个</span>
+          <el-button class="btn-select-all" @click="toggleSelectAll">
+            <el-icon><Select /></el-icon>
+            <span>{{ allSelected ? '取消全选' : '全选本页' }}</span>
+          </el-button>
+          <el-button type="danger" class="btn-batch-delete" :loading="batchDeleting" @click="handleBatchDelete">
+            <el-icon><Delete /></el-icon>
+            <span>删除所选</span>
+          </el-button>
+          <el-button class="btn-cancel-select" @click="exitSelectMode">取消</el-button>
+        </template>
+        <!-- 常规按钮 -->
+        <template v-else>
+          <el-button class="btn-batch" @click="enterSelectMode">
+            <el-icon><Select /></el-icon>
+            <span>批量删除</span>
+          </el-button>
+          <el-button class="btn-refresh" @click="fetchMaterials" :loading="false">
+            <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
+            <span v-if="isRefreshing">刷新中</span>
+            <span v-else>刷新</span>
+          </el-button>
+          <el-button type="primary" class="btn-upload" @click="handleUploadMaterial">
+            <el-icon><Upload /></el-icon>
+            <span>上传素材</span>
+          </el-button>
+        </template>
       </div>
     </div>
 
@@ -48,8 +68,13 @@
         <div
           v-for="mat in items"
           :key="mat.id"
-          class="mat-card"
+          :class="['mat-card', { 'mat-card-selected': selectedIds.has(mat.id), 'mat-card-selectable': selectMode }]"
+          @click="selectMode && toggleSelect(mat)"
         >
+          <!-- 选择态勾选框 -->
+          <div v-if="selectMode" class="mat-card-check" :class="{ checked: selectedIds.has(mat.id) }">
+            <el-icon :size="14"><Check /></el-icon>
+          </div>
           <!-- Preview -->
           <div class="mat-card-preview">
             <img
@@ -92,8 +117,9 @@
               {{ mat.storage_type === 's3' ? 'S3' : '本地' }}
             </span>
 
-            <!-- 删除按钮（hover 浮现） -->
+            <!-- 删除按钮（hover 浮现；批量选择态隐藏） -->
             <button
+              v-if="!selectMode"
               class="mat-card-delete-btn"
               :aria-label="`删除 ${mat.original_filename}`"
               @click.stop="handleDelete(mat)"
@@ -199,6 +225,8 @@ import {
   VideoCamera,
   Grid,
   Monitor,
+  Select,
+  Check,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { materialsApi } from '@/api/materials'
@@ -234,24 +262,37 @@ const previewDialogVisible = ref(false)
 const currentMaterial = ref(null)
 const previewVideoRef = ref(null)
 
+// 批量选择
+const selectMode = ref(false)
+const selectedIds = ref(new Set())
+const batchDeleting = ref(false)
+const selectedCount = computed(() => selectedIds.value.size)
+const allSelected = computed(
+  () => items.value.length > 0 && items.value.every((m) => selectedIds.value.has(m.id)),
+)
+
 function onSearchInput() {
   page.value = 1
+  selectedIds.value = new Set()
   loadPage()
 }
 
 function onSearchClear() {
   page.value = 1
+  selectedIds.value = new Set()
   loadPage()
 }
 
 function onTypeChange(value) {
   typeFilter.value = value
   page.value = 1
+  selectedIds.value = new Set()
   loadPage()
 }
 
 function onPageSizeChange() {
   page.value = 1
+  selectedIds.value = new Set()
   loadPage()
 }
 
@@ -388,6 +429,96 @@ function handleDelete(mat) {
     .catch(() => {})
 }
 
+// ===== 批量删除 =====
+function enterSelectMode() {
+  selectMode.value = true
+  selectedIds.value = new Set()
+}
+
+function exitSelectMode() {
+  selectMode.value = false
+  selectedIds.value = new Set()
+}
+
+function toggleSelect(mat) {
+  const next = new Set(selectedIds.value)
+  if (next.has(mat.id)) next.delete(mat.id)
+  else next.add(mat.id)
+  selectedIds.value = next
+}
+
+function toggleSelectAll() {
+  if (allSelected.value) {
+    // 取消本页全选
+    const next = new Set(selectedIds.value)
+    items.value.forEach((m) => next.delete(m.id))
+    selectedIds.value = next
+  } else {
+    // 选中本页全部
+    const next = new Set(selectedIds.value)
+    items.value.forEach((m) => next.add(m.id))
+    selectedIds.value = next
+  }
+}
+
+function isCardClickSelectable(e) {
+  // 选择态下点击卡片切换选中，但不拦截点击预览/删除等按钮（它们自带 .stop）
+  return selectMode.value
+}
+
+function handleBatchDelete() {
+  const ids = Array.from(selectedIds.value)
+  if (ids.length === 0) {
+    ElMessage.warning('请先选择要删除的素材')
+    return
+  }
+  ElMessageBox.confirm(
+    `确定要删除选中的 ${ids.length} 个素材吗？\n将同时删除对应的文件，该操作不可恢复。`,
+    '批量删除素材',
+    {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    }
+  )
+    .then(async () => {
+      batchDeleting.value = true
+      try {
+        const response = await materialsApi.batchDelete(ids)
+        if (response.code === 200) {
+          const data = response.data || {}
+          const deleted = data.deleted != null ? data.deleted : 0
+          const failed = data.failed != null ? data.failed : []
+          ids.forEach((id) => appStore.removeMaterial(id))
+          if (failed.length > 0) {
+            ElMessage.warning(`已删除 ${deleted} 个，${failed.length} 个失败`)
+          } else {
+            ElMessage.success(`已删除 ${deleted} 个素材`)
+          }
+          // 删除后若当前页空了，回退
+          if (items.value.length - deleted <= 0 && page.value > 1) {
+            page.value -= 1
+          }
+          selectedIds.value = new Set()
+          selectMode.value = false
+          await loadPage()
+          // 同步 store
+          materialsApi.list({ page_size: 200 }).then((r) => {
+            if (r.code === 200) appStore.setMaterials(r.data.items || [])
+          })
+        } else {
+          ElMessage.error(response.msg || '批量删除失败')
+        }
+      } catch (error) {
+        console.error('批量删除素材出错:', error)
+        ElMessage.error('批量删除失败')
+      } finally {
+        batchDeleting.value = false
+      }
+    })
+    .catch(() => {})
+}
+
 onMounted(() => {
   loadPage()
 })
@@ -398,10 +529,10 @@ onMounted(() => {
 
 $brand-1: #5b8cff;
 $brand-2: #8b5cff;
-$text-1: #e5e7eb;
+$text-1: $text-primary;
 $text-2: #9ca3af;
 $text-3: #6b7280;
-$border: rgba(255, 255, 255, 0.08);
+$border: rgba($overlay-rgb, 0.08);
 $danger: #ef4444;
 
 @keyframes rotate {
@@ -448,12 +579,12 @@ $danger: #ef4444;
   flex-shrink: 0;
 
   :deep(.el-input__wrapper) {
-    background: rgba(0, 0, 0, 0.2);
+    background: $bg-base;
     border: 1px solid $border;
     border-radius: 8px;
     box-shadow: none;
     padding: 3px 12px;
-    &:hover { border-color: rgba(255, 255, 255, 0.16); }
+    &:hover { border-color: rgba($overlay-rgb, 0.16); }
     &.is-focus {
       border-color: rgba($brand-1, 0.5);
       box-shadow: 0 0 0 3px rgba($brand-1, 0.12);
@@ -467,7 +598,7 @@ $danger: #ef4444;
   display: flex;
   gap: 4px;
   padding: 3px;
-  background: rgba(0, 0, 0, 0.2);
+  background: $bg-base;
   border: 1px solid $border;
   border-radius: 8px;
   flex-shrink: 0;
@@ -488,7 +619,7 @@ $danger: #ef4444;
   transition: all 0.15s ease;
   white-space: nowrap;
 
-  &:hover { color: $text-1; background: rgba(255, 255, 255, 0.04); }
+  &:hover { color: $text-1; background: rgba($overlay-rgb, 0.04); }
 
   &.active {
     color: #fff;
@@ -505,7 +636,7 @@ $danger: #ef4444;
   .is-loading { animation: rotate 1s linear infinite; }
 
   .btn-refresh {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba($overlay-rgb, 0.04);
     border: 1px solid $border;
     color: $text-secondary;
     &:hover { border-color: $border-active; color: $text-primary; }
@@ -535,6 +666,7 @@ $danger: #ef4444;
 }
 
 .mat-card {
+  position: relative;
   border-radius: 10px;
   background: $bg-elevated;
   border: 1px solid $border;
@@ -549,6 +681,61 @@ $danger: #ef4444;
     .mat-card-preview img { transform: scale(1.05); }
     .mat-card-delete-btn { opacity: 1; }
   }
+
+  // 选择态：卡片可点击、选中高亮
+  &.mat-card-selectable { cursor: pointer; }
+  &.mat-card-selected {
+    border-color: $brand-1;
+    box-shadow: 0 0 0 2px rgba($brand-1, 0.45);
+  }
+}
+
+// 批量选择勾选框
+.mat-card-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  transition: all 0.15s ease;
+
+  &.checked {
+    background: $brand-1;
+    border-color: $brand-1;
+    color: #fff;
+  }
+}
+
+// 批量操作条
+.batch-count {
+  font-size: 13px;
+  color: $text-1;
+  font-weight: 600;
+  margin-right: 4px;
+  white-space: nowrap;
+}
+.btn-batch,
+.btn-select-all,
+.btn-cancel-select {
+  border: 1px solid $border;
+  background: rgba($overlay-rgb, 0.04);
+  color: $text-1;
+  &:hover {
+    border-color: rgba($brand-1, 0.4);
+    color: $brand-1;
+    background: rgba($brand-1, 0.08);
+  }
+}
+.btn-batch-delete {
+  // type=danger 自带红色
 }
 
 .mat-card-preview {
@@ -556,7 +743,7 @@ $danger: #ef4444;
   aspect-ratio: 1;
   overflow: hidden;
   background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.1));
+    linear-gradient(135deg, rgba($overlay-rgb, 0.02), rgba(0, 0, 0, 0.1));
 
   img {
     width: 100%;
@@ -606,7 +793,7 @@ $danger: #ef4444;
   padding: 2px 8px;
   background: rgba(0, 0, 0, 0.7);
   backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba($overlay-rgb, 0.15);
   border-radius: 4px;
   color: #d1d5db;
   font-size: 11px;
@@ -617,8 +804,8 @@ $danger: #ef4444;
 
   &.s3 {
     color: #fff;
-    background: rgba(37, 99, 235, 0.7);
-    border-color: rgba(96, 165, 250, 0.5);
+    background: rgba($info-color, 0.7);
+    border-color: rgba($info-color, 0.5);
   }
 }
 
@@ -750,14 +937,14 @@ $danger: #ef4444;
   border-radius: $radius-card;
 
   :deep(.el-pagination) {
-    --el-pagination-bg-color: rgba(255, 255, 255, 0.04);
-    --el-pagination-button-bg-color: rgba(255, 255, 255, 0.04);
+    --el-pagination-bg-color: rgba($overlay-rgb, 0.04);
+    --el-pagination-button-bg-color: rgba($overlay-rgb, 0.04);
     --el-pagination-button-color: #{$text-2};
     --el-pagination-hover-color: #{$brand-1};
     --el-pagination-button-disabled-bg-color: transparent;
 
     .btn-prev, .btn-next, .el-pager li {
-      background: rgba(255, 255, 255, 0.04) !important;
+      background: rgba($overlay-rgb, 0.04) !important;
       color: $text-2 !important;
       &:hover { color: $brand-1 !important; }
     }
