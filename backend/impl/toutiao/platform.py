@@ -10,14 +10,15 @@
 
 import asyncio
 import json
+import re
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
 
 from util._logger import bind_account_name, get_channel_logger
 from util.publish_debug import log_event
-
 from conf import BASE_DIR
 
 from .._browser import create_browser_sync, create_context_sync
@@ -355,7 +356,7 @@ class ToutiaoPlatform(BasePlatform):
                 nick = get_account_name_by_cookie_file(cookie_name)
                 with bind_account_name(nick or "-"):
                     logger.info("[发布进度] 发布到第 %d/%d 个账号 (%s)", cookie_index + 1, len(account_paths), nick or "未知")
-                    await self._upload_one_video(
+                    ok = await self._upload_one_video(
                         title=title,
                         file_path=file_path,
                         tags=tags,
@@ -373,6 +374,13 @@ class ToutiaoPlatform(BasePlatform):
                         extend_link=extend_link,
                         extend_link_url=extend_link_url,
                     )
+                    if not ok:
+                        logger.error(
+                            "[发布进度] 账号发布失败: file=%s account=%s",
+                            file_path,
+                            nick or cookie_name,
+                        )
+                        return False
 
         logger.info("=" * 60)
         logger.info("[发布视频] 视频发布流程完成!")
@@ -401,10 +409,11 @@ class ToutiaoPlatform(BasePlatform):
         collection_id="",
         extend_link=False,
         extend_link_url="",
-    ):
+    ) -> bool:
         """Upload a single video to one Toutiao account."""
         logger.info("[上传视频] 开始上传视频: %s", file_path)
         browser = await self.create_browser(headless=False)
+        preserve_browser = False
         try:
             context = await self.create_context(browser, storage_state=account_file)
             try:
@@ -436,13 +445,10 @@ class ToutiaoPlatform(BasePlatform):
                         success_text = page.locator('span.percent:has-text("上传成功")')
                         if await success_text.count():
                             upload_complete = True
-                            log_event(
-                                logger,
-                                "UPLOAD_SUMMARY",
-                                elapsed_s=round(asyncio.get_event_loop().time() - start_time, 1),
-                                ready_reason="percent_upload_success",
-                                current_url=page.url,
-                                file_path=file_path,
+                            logger.info(
+                                "[上传视频] 上传完成摘要: 耗时 %.1f 秒, 原因=检测到上传成功, 页面=%s",
+                                round(asyncio.get_event_loop().time() - start_time, 1),
+                                page.url,
                             )
                             logger.info("[上传视频] 视频上传成功!")
                             break
@@ -458,16 +464,14 @@ class ToutiaoPlatform(BasePlatform):
                     await asyncio.sleep(2)
 
                 if not upload_complete:
-                    log_event(
-                        logger,
-                        "UPLOAD_SUMMARY",
-                        elapsed_s=max_wait,
-                        ready_reason="timeout",
-                        current_url=page.url,
-                        file_path=file_path,
+                    logger.error(
+                        "[上传视频] 上传超时摘要: 已等待 %d 秒, 页面=%s",
+                        max_wait,
+                        page.url,
                     )
                     logger.error("[上传视频] 视频上传超时! 已等待 %d 秒", max_wait)
-                    return
+                    preserve_browser = True
+                    return False
 
                 await asyncio.sleep(2)
 
@@ -599,40 +603,582 @@ class ToutiaoPlatform(BasePlatform):
                 # Schedule if needed
                 if publish_strategy == "scheduled" and publish_date != 0:
                     logger.info("[定时发布] 开始设置定时发布时间: %s", publish_date)
-                    await self._set_schedule_time(page, publish_date)
+                    schedule_ok = await self._set_schedule_time(page, publish_date)
+                    if not schedule_ok:
+                        logger.error("[定时发布] 定时发布时间设置失败，终止本次发布")
+                        preserve_browser = True
+                        return False
                     logger.info("[定时发布] 定时发布时间设置完成")
+                    schedule_status, schedule_reason, schedule_url = await self._wait_for_schedule_submit_result(page)
+                    if schedule_status == "submitted":
+                        logger.info(
+                            "[定时发布] 弹窗确认后已直接提交成功! 判定=%s, 当前页面: %s",
+                            schedule_reason,
+                            schedule_url,
+                        )
+                        try:
+                            await context.storage_state(path=account_file)
+                            logger.info("[发布] Cookie状态已更新")
+                        except Exception as e:
+                            logger.warning("[发布] Cookie状态更新失败(非致命): %s", e)
+                        return True
+                    if schedule_status == "failed":
+                        logger.error(
+                            "[定时发布] 弹窗确认后检测到失败! 判定=%s, 当前页面: %s",
+                            schedule_reason,
+                            schedule_url,
+                        )
+                        preserve_browser = True
+                        return False
+                    logger.info(
+                        "[定时发布] 弹窗确认后页面仍在发布页，继续查找主发布按钮。当前页面: %s",
+                        schedule_url,
+                    )
 
                 # Click publish
                 logger.info("[发布] 正在点击发布按钮...")
-                publish_btn = page.locator('button.action-footer-btn.submit')
-                if not await publish_btn.count():
-                    publish_btn = page.get_by_role("button", name="发布", exact=True)
-                log_event(
-                    logger,
-                    "PUBLISH_GATE",
-                    stage="before_click",
-                    button_count=await publish_btn.count(),
-                    current_url=page.url,
-                )
+                publish_btn, publish_selector = await self._wait_for_publish_button(page)
+                if publish_btn is None:
+                    logger.error("[发布] 未找到发布按钮，终止本次发布。当前页面: %s", page.url)
+                    preserve_browser = True
+                    return False
+                logger.info("[发布] 命中发布按钮选择器: %s", publish_selector)
                 await publish_btn.click()
+                logger.info("[发布] 发布按钮已点击，等待页面跳转或成功提示...")
 
-                # Wait for redirect (publish success)
-                await asyncio.sleep(3)
-                current_url = page.url
-                if "upload-video" not in current_url:
-                    log_event(logger, "PUBLISH_RESULT", result="url_success", current_url=current_url)
-                    logger.info("[发布] 视频发布成功! 页面跳转到: %s", current_url)
+                publish_success, result, current_url = await self._wait_for_publish_result(page)
+                if publish_success:
+                    logger.info("[发布] 视频发布成功! 判定=%s, 当前页面: %s", result, current_url)
                 else:
-                    log_event(logger, "PUBLISH_RESULT", result="uncertain_after_3s", current_url=current_url)
-                    logger.info("[发布] 发布按钮已点击，等待确认...")
+                    logger.error("[发布] 发布失败! 判定=%s, 当前页面: %s", result, current_url)
+                    preserve_browser = True
 
                 # Save updated cookie state
-                await context.storage_state(path=account_file)
-                logger.info("[发布] Cookie状态已更新")
+                try:
+                    await context.storage_state(path=account_file)
+                    logger.info("[发布] Cookie状态已更新")
+                except Exception as e:
+                    logger.warning("[发布] Cookie状态更新失败(非致命): %s", e)
+                return publish_success
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                preserve_browser = True
+                logger.exception("[发布] 自动化流程异常，保留当前页面供人工检查: %s", e)
+                return False
             finally:
-                await context.close()
+                if preserve_browser:
+                    logger.warning("[发布] 未确认成功，保留当前页面供人工检查")
+                else:
+                    await context.close()
         finally:
-            await self.close_browser(browser, is_close_by_code=True)
+            if preserve_browser:
+                logger.warning("[发布] 未确认成功，保留浏览器窗口供人工检查")
+            else:
+                await self.close_browser(browser, is_close_by_code=True)
+
+    @staticmethod
+    async def _find_first_visible(page, selectors: list[str], timeout_ms: int = 2000):
+        """Return the first visible locator for the given selector list."""
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() == 0:
+                    continue
+                await locator.wait_for(state="visible", timeout=timeout_ms)
+                if await locator.is_enabled():
+                    return locator, selector
+            except Exception:
+                continue
+        return None, None
+
+    @staticmethod
+    async def _read_text(locator) -> str:
+        """Safely read locator text."""
+        try:
+            return ((await locator.text_content()) or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _normalize_day_text(value: str) -> str:
+        match = re.search(r"(\d{1,2})月(\d{1,2})日", (value or "").strip())
+        if not match:
+            return (value or "").strip()
+        return f"{int(match.group(1)):02d}月{int(match.group(2)):02d}日"
+
+    @staticmethod
+    def _normalize_hour_text(value: str) -> str:
+        match = re.search(r"\d+", (value or "").strip())
+        if not match:
+            return (value or "").strip()
+        return str(int(match.group(0)))
+
+    @staticmethod
+    def _normalize_minute_text(value: str) -> str:
+        match = re.search(r"\d+", (value or "").strip())
+        if not match:
+            return (value or "").strip()
+        return f"{int(match.group(0)):02d}"
+
+    @staticmethod
+    def _parse_timer_summary_text(value: str) -> datetime | None:
+        text = (value or "").strip()
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _validate_schedule_publish_date(
+        publish_date: datetime,
+        now: datetime | None = None,
+    ) -> tuple[bool, str]:
+        """Validate Toutiao scheduled publish time window."""
+        if now is None:
+            now = datetime.now().replace(second=0, microsecond=0)
+        target = publish_date.replace(second=0, microsecond=0)
+        min_allowed = now + timedelta(hours=2)
+        max_allowed = now + timedelta(days=7)
+        if target < min_allowed:
+            return False, f"目标时间早于当前时间+2小时: target={target:%Y-%m-%d %H:%M}, min={min_allowed:%Y-%m-%d %H:%M}"
+        if target > max_allowed:
+            return False, f"目标时间晚于当前时间+7天: target={target:%Y-%m-%d %H:%M}, max={max_allowed:%Y-%m-%d %H:%M}"
+        return True, ""
+
+    @staticmethod
+    async def _read_schedule_modal_state(modal) -> dict:
+        """Read current selected values from schedule modal."""
+        day_raw = await ToutiaoPlatform._read_text(
+            modal.locator(".day-select .byte-select-view-value").first
+        )
+        hour_raw = await ToutiaoPlatform._read_text(
+            modal.locator(".hour-select .byte-select-view-value").first
+        )
+        minute_raw = await ToutiaoPlatform._read_text(
+            modal.locator(".minute-select .byte-select-view-value").first
+        )
+        summary = await ToutiaoPlatform._read_text(
+            modal.locator(".timer-time").first
+        )
+        summary_dt = ToutiaoPlatform._parse_timer_summary_text(summary)
+        return {
+            "day_raw": day_raw,
+            "hour_raw": hour_raw,
+            "minute_raw": minute_raw,
+            "summary": summary,
+            "day_norm": ToutiaoPlatform._normalize_day_text(day_raw),
+            "hour_norm": ToutiaoPlatform._normalize_hour_text(hour_raw),
+            "minute_norm": ToutiaoPlatform._normalize_minute_text(minute_raw),
+            "summary_dt": summary_dt,
+        }
+
+    @staticmethod
+    async def _click_visible_option_by_value(
+        page,
+        field_label: str,
+        expected_value: str,
+        normalizer,
+    ) -> tuple[bool, str]:
+        """Click a visible dropdown option by normalized text."""
+        expected_norm = normalizer(expected_value)
+        option_locator = page.locator(".byte-select-option, [role='option']")
+        count = await option_locator.count()
+        visible_texts: list[str] = []
+        for idx in range(count):
+            option = option_locator.nth(idx)
+            try:
+                if not await option.is_visible():
+                    continue
+                raw_text = ((await option.text_content()) or "").strip()
+                if not raw_text:
+                    continue
+                visible_texts.append(raw_text)
+                if normalizer(raw_text) != expected_norm:
+                    continue
+                await option.click()
+                logger.info(
+                    "[定时发布][%s] 已点击步进选项: raw=%s normalized=%s",
+                    field_label,
+                    raw_text,
+                    expected_norm,
+                )
+                return True, raw_text
+            except Exception:
+                continue
+        logger.warning(
+            "[定时发布][%s] 未找到目标选项: expected=%s visible=%s",
+            field_label,
+            expected_norm,
+            visible_texts[:20],
+        )
+        return False, ""
+
+    @staticmethod
+    async def _wait_modal_hidden(modal, timeout_seconds: int = 5) -> bool:
+        """Wait until schedule modal is hidden."""
+        deadline = time.perf_counter() + timeout_seconds
+        while time.perf_counter() < deadline:
+            try:
+                if await modal.count() == 0:
+                    return True
+                if not await modal.first.is_visible():
+                    return True
+            except Exception:
+                return True
+            await asyncio.sleep(0.2)
+        return False
+
+    @staticmethod
+    async def _select_schedule_value(
+        page,
+        modal,
+        *,
+        field_label: str,
+        select_selector: str,
+        value_selector: str,
+        target_display: str,
+        normalizer,
+    ) -> bool:
+        """Open one select and directly choose the target value."""
+        current_value = normalizer(
+            await ToutiaoPlatform._read_text(modal.locator(value_selector).first)
+        )
+        target_norm = normalizer(target_display)
+        logger.info(
+            "[定时发布][%s] 当前值=%s，目标值=%s",
+            field_label,
+            current_value,
+            target_norm,
+        )
+        if current_value == target_norm:
+            logger.info("[定时发布][%s] 当前值已匹配目标值，跳过选择", field_label)
+            return True
+
+        logger.info("[定时发布][%s] 打开下拉并直接选择目标值: %s", field_label, target_norm)
+        await modal.locator(select_selector).first.click()
+        await asyncio.sleep(0.5)
+        ok, clicked_text = await ToutiaoPlatform._click_visible_option_by_value(
+            page,
+            field_label,
+            target_display,
+            normalizer,
+        )
+        if not ok:
+            logger.warning("[定时发布][%s] 未能直接选中目标值: %s", field_label, target_norm)
+            return False
+        await asyncio.sleep(0.5)
+        actual_value = normalizer(
+            await ToutiaoPlatform._read_text(modal.locator(value_selector).first)
+        )
+        logger.info(
+            "[定时发布][%s] 选择结果: 点击=%s，实际值=%s，目标值=%s",
+            field_label,
+            clicked_text,
+            actual_value,
+            target_norm,
+        )
+        return actual_value == target_norm
+
+    @staticmethod
+    async def _wait_for_publish_button(page, timeout_seconds: int = 10):
+        """Wait for Toutiao publish button to become visible after schedule modal closes."""
+        selectors = [
+            'button[data-wkswitch="disable-auto-publish"].action-footer-btn.submit:has-text("发布")',
+            'button.action-footer-btn.submit:has-text("发布")',
+            'button[data-wkswitch="disable-auto-publish"]:has-text("发布")',
+            'button.action-footer-btn.submit',
+            'button:has-text("发布")',
+            '[role="button"]:has-text("发布")',
+        ]
+        deadline = time.perf_counter() + timeout_seconds
+        last_url = page.url
+        while time.perf_counter() < deadline:
+            publish_btn, publish_selector = await ToutiaoPlatform._find_first_visible(
+                page,
+                selectors,
+                timeout_ms=800,
+            )
+            if publish_btn is not None:
+                return publish_btn, publish_selector
+            last_url = page.url
+            await asyncio.sleep(0.3)
+        logger.warning("[发布] 等待发布按钮超时，当前页面: %s", last_url)
+        return None, None
+
+    @staticmethod
+    async def _wait_for_schedule_submit_result(
+        page,
+        timeout_seconds: int = 12,
+    ) -> tuple[str, str, str]:
+        """Wait after schedule modal confirmation to see whether submit already succeeded."""
+        success_texts = ("发布成功", "定时发布成功", "预约成功", "提交成功")
+        for _ in range(max(timeout_seconds * 2, 1)):
+            current_url = page.url
+            if "upload-video" not in current_url:
+                return "submitted", "页面已跳转", current_url
+
+            success_text = await ToutiaoPlatform._find_visible_success_text(page, success_texts)
+            if success_text:
+                return "submitted", f"检测到成功提示：{success_text}", current_url
+
+            feedback = await ToutiaoPlatform._extract_publish_feedback(page)
+            if feedback:
+                return "failed", f"检测到错误提示：{feedback}", current_url
+
+            await asyncio.sleep(0.5)
+
+        return "pending", "页面仍停留在发布页", page.url
+
+    @staticmethod
+    async def _step_schedule_day(page, modal, current_dt: datetime, target_dt: datetime) -> tuple[bool, datetime]:
+        """Move schedule day by a single-day step toward target."""
+        direction = 1 if current_dt.date() < target_dt.date() else -1
+        next_dt = current_dt + timedelta(days=direction)
+        expected_day = next_dt.strftime("%m月%d日")
+        step_started_at = time.perf_counter()
+        logger.info(
+            "[定时发布][日期] 步进开始: current=%s target=%s next=%s step=%+d天",
+            current_dt.strftime("%Y-%m-%d"),
+            target_dt.strftime("%Y-%m-%d"),
+            next_dt.strftime("%Y-%m-%d"),
+            direction,
+        )
+        log_event(
+            logger,
+            "SCHEDULE_DAY_STEP_START",
+            current=current_dt.strftime("%Y-%m-%d"),
+            target=target_dt.strftime("%Y-%m-%d"),
+            expected=next_dt.strftime("%Y-%m-%d"),
+            step=direction,
+            current_url=page.url,
+        )
+        await modal.locator(".day-select.byte-select").first.click()
+        await asyncio.sleep(0.5)
+        ok, clicked_text = await ToutiaoPlatform._click_visible_option_by_value(
+            page,
+            "日期",
+            expected_day,
+            ToutiaoPlatform._normalize_day_text,
+        )
+        elapsed_ms = int((time.perf_counter() - step_started_at) * 1000)
+        log_event(
+            logger,
+            "SCHEDULE_DAY_STEP_RESULT",
+            expected=expected_day,
+            clicked=clicked_text,
+            result=ok,
+            current_url=page.url,
+            elapsed_ms=elapsed_ms,
+        )
+        if not ok:
+            return False, current_dt
+        await asyncio.sleep(0.5)
+        state = await ToutiaoPlatform._read_schedule_modal_state(modal)
+        actual_day = state["day_norm"]
+        actual_summary = state["summary"]
+        actual_dt = state["summary_dt"]
+        verify_ok = (
+            actual_day == ToutiaoPlatform._normalize_day_text(expected_day)
+            and actual_dt is not None
+            and actual_dt.date() == next_dt.date()
+        )
+        logger.info(
+            "[定时发布][日期] 步进校验: expected=%s actual=%s summary=%s result=%s",
+            ToutiaoPlatform._normalize_day_text(expected_day),
+            actual_day,
+            actual_summary,
+            "ok" if verify_ok else "failed",
+        )
+        log_event(
+            logger,
+            "SCHEDULE_DAY_STEP_VERIFY",
+            expected=ToutiaoPlatform._normalize_day_text(expected_day),
+            actual=actual_day,
+            summary=actual_summary,
+            result=verify_ok,
+            current_url=page.url,
+        )
+        return verify_ok, (actual_dt or current_dt)
+
+    @staticmethod
+    async def _step_schedule_numeric(
+        page,
+        modal,
+        *,
+        field_label: str,
+        current_value: int,
+        target_value: int,
+        select_selector: str,
+        state_key: str,
+        normalizer,
+        summary_attr: str,
+    ) -> tuple[bool, int]:
+        """Move hour/minute value by a single unit toward target."""
+        direction = 1 if current_value < target_value else -1
+        next_value = current_value + direction
+        expected_display = f"{next_value:02d}" if field_label == "分钟" else str(next_value)
+        step_started_at = time.perf_counter()
+        logger.info(
+            "[定时发布][%s] 步进开始: current=%s target=%s next=%s step=%+d",
+            field_label,
+            current_value,
+            target_value,
+            next_value,
+            direction,
+        )
+        log_event(
+            logger,
+            f"SCHEDULE_{'HOUR' if field_label == '小时' else 'MINUTE'}_STEP_START",
+            current=current_value,
+            target=target_value,
+            expected=next_value,
+            step=direction,
+            current_url=page.url,
+        )
+        await modal.locator(select_selector).first.click()
+        await asyncio.sleep(0.5)
+        ok, clicked_text = await ToutiaoPlatform._click_visible_option_by_value(
+            page,
+            field_label,
+            expected_display,
+            normalizer,
+        )
+        elapsed_ms = int((time.perf_counter() - step_started_at) * 1000)
+        log_event(
+            logger,
+            f"SCHEDULE_{'HOUR' if field_label == '小时' else 'MINUTE'}_STEP_RESULT",
+            expected=expected_display,
+            clicked=clicked_text,
+            result=ok,
+            current_url=page.url,
+            elapsed_ms=elapsed_ms,
+        )
+        if not ok:
+            return False, current_value
+        await asyncio.sleep(0.5)
+        state = await ToutiaoPlatform._read_schedule_modal_state(modal)
+        actual_display = state[state_key]
+        actual_summary_dt = state["summary_dt"]
+        actual_summary_value = getattr(actual_summary_dt, summary_attr) if actual_summary_dt else None
+        expected_norm = normalizer(expected_display)
+        verify_ok = actual_display == expected_norm and actual_summary_value == next_value
+        logger.info(
+            "[定时发布][%s] 步进校验: expected=%s actual=%s summary=%s result=%s",
+            field_label,
+            expected_norm,
+            actual_display,
+            state["summary"],
+            "ok" if verify_ok else "failed",
+        )
+        log_event(
+            logger,
+            f"SCHEDULE_{'HOUR' if field_label == '小时' else 'MINUTE'}_STEP_VERIFY",
+            expected=expected_norm,
+            actual=actual_display,
+            summary=state["summary"],
+            result=verify_ok,
+            current_url=page.url,
+        )
+        return verify_ok, (actual_summary_value if actual_summary_value is not None else current_value)
+
+    @staticmethod
+    async def _find_visible_success_text(page, success_texts: tuple[str, ...]) -> str:
+        """Return the first visible success text."""
+        for text in success_texts:
+            try:
+                locator = page.get_by_text(text, exact=False).first
+                if await locator.count() and await locator.is_visible():
+                    return text
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    async def _extract_publish_feedback(page) -> str:
+        """Read visible validation/error feedback text after clicking publish."""
+        selectors = (
+            "[role='alert']",
+            ".byte-message-content",
+            ".byte-message-notice-content",
+            ".arco-message-content",
+            ".byte-form-item-status-error",
+            ".byte-form-item-feedback",
+            ".form-item-error",
+            "[class*='error-message']",
+            "[class*='error-tip']",
+        )
+        failure_keywords = ("失败", "错误", "请", "至少", "最多", "2小时", "7天", "非法", "不能为空")
+        for selector in selectors:
+            try:
+                locator = page.locator(selector)
+                count = await locator.count()
+                for idx in range(min(count, 10)):
+                    item = locator.nth(idx)
+                    if not await item.is_visible():
+                        continue
+                    text = ((await item.text_content()) or "").strip()
+                    if text and any(keyword in text for keyword in failure_keywords):
+                        return text
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    async def _wait_for_publish_accept(
+        page,
+        publish_selector: str,
+        timeout_seconds: int = 5,
+    ) -> tuple[bool, str]:
+        """Wait for any immediate post-click acknowledgment."""
+        success_texts = ("发布成功", "定时发布成功", "预约成功", "提交成功")
+        for _ in range(max(timeout_seconds * 2, 1)):
+            current_url = page.url
+            if "upload-video" not in current_url:
+                return True, "url_changed"
+            success_text = await ToutiaoPlatform._find_visible_success_text(page, success_texts)
+            if success_text:
+                return True, f"success_text:{success_text}"
+            feedback = await ToutiaoPlatform._extract_publish_feedback(page)
+            if feedback:
+                return False, f"feedback_error:{feedback}"
+            try:
+                button = page.locator(publish_selector).first
+                if await button.count() == 0:
+                    return True, "button_hidden"
+                classes = (await button.get_attribute("class") or "").lower()
+                if "loading" in classes or "disabled" in classes:
+                    return True, "button_loading_or_disabled"
+                if not await button.is_enabled():
+                    return True, "button_disabled"
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return False, "no_immediate_feedback"
+
+    @staticmethod
+    async def _wait_for_publish_result(page, timeout_seconds: int = 30) -> tuple[bool, str, str]:
+        """Wait for a definitive publish success signal."""
+        success_texts = ("发布成功", "定时发布成功", "预约成功", "提交成功")
+        for _ in range(max(timeout_seconds, 0) + 1):
+            current_url = page.url
+            if "upload-video" not in current_url:
+                return True, "页面已跳转", current_url
+
+            success_text = await ToutiaoPlatform._find_visible_success_text(page, success_texts)
+            if success_text:
+                return True, f"检测到成功提示：{success_text}", current_url
+
+            feedback = await ToutiaoPlatform._extract_publish_feedback(page)
+            if feedback:
+                return False, f"检测到错误提示：{feedback}", current_url
+
+            if timeout_seconds <= 0:
+                break
+            await asyncio.sleep(1)
+            timeout_seconds -= 1
+
+        return False, "超时后仍停留在发布页", page.url
 
     # ------------------------------------------------------------------
     # Helper: fill tags
@@ -1028,63 +1574,152 @@ class ToutiaoPlatform(BasePlatform):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _set_schedule_time(page, publish_date):
+    async def _set_schedule_time(page, publish_date) -> bool:
         """Set scheduled publish time."""
         logger.info("[定时发布] 开始设置定时发布时间: %s", publish_date)
         try:
-            timer_btn = page.locator('button.action-footer-btn.timer:has-text("定时发布")')
-            if await timer_btn.count():
-                await timer_btn.click()
-                await asyncio.sleep(2)
-                logger.info("[定时发布] 已打开定时发布弹窗")
+            valid, reason = ToutiaoPlatform._validate_schedule_publish_date(publish_date)
+            if not valid:
+                logger.error("[定时发布] 目标时间校验失败: %s", reason)
+                return False
 
-                # Parse the publish date
-                month_day = publish_date.strftime("%m月%d日")
-                hour = str(publish_date.hour)
-                minute = str(publish_date.minute)
-                logger.info("[定时发布] 设置日期: %s, 时间: %s:%s", month_day, hour, minute)
+            target_day = publish_date.strftime("%m月%d日")
+            target_hour = publish_date.hour
+            target_minute = publish_date.minute
+            target_summary = publish_date.strftime("%Y-%m-%d %H:%M")
+            logger.info(
+                "[定时发布] 目标时间: 日期=%s 小时=%s 分钟=%02d 汇总=%s",
+                target_day,
+                target_hour,
+                target_minute,
+                target_summary,
+            )
 
-                # Select day
-                day_select = page.locator('.day-select .byte-select-view')
-                if await day_select.count():
-                    await day_select.click()
-                    await asyncio.sleep(1)
-                    day_option = page.locator(f'.byte-select-option:has-text("{month_day}")')
-                    if await day_option.count():
-                        await day_option.click()
-                        await asyncio.sleep(0.5)
-                        logger.info("[定时发布] 日期已选择: %s", month_day)
-
-                # Select hour
-                hour_select = page.locator('.hour-select .byte-select-view')
-                if await hour_select.count():
-                    await hour_select.click()
-                    await asyncio.sleep(1)
-                    hour_option = page.locator(f'.byte-select-popup-inner .byte-select-option:has-text("{hour}")')
-                    if await hour_option.count():
-                        await hour_option.click()
-                        await asyncio.sleep(0.5)
-                        logger.info("[定时发布] 小时已选择: %s", hour)
-
-                # Select minute
-                minute_select = page.locator('.minute-select .byte-select-view')
-                if await minute_select.count():
-                    await minute_select.click()
-                    await asyncio.sleep(1)
-                minute_padded = minute.zfill(2)
-                minute_option = page.locator(f'.byte-select-popup-inner .byte-select-option:has-text("{minute_padded}")')
-                if await minute_option.count():
-                    await minute_option.click()
-                    await asyncio.sleep(0.5)
-                    logger.info("[定时发布] 分钟已选择: %s", minute_padded)
-
-                # Click the "定时发布" button in the dialog
-                confirm_btn = page.locator('.byte-modal-footer button:has-text("定时发布")')
-                if await confirm_btn.count():
-                    await confirm_btn.click()
-                    await asyncio.sleep(2)
-                    logger.info("[定时发布] 定时发布设置完成")
-            else:
+            timer_btn, timer_selector = await ToutiaoPlatform._find_first_visible(
+                page,
+                [
+                    'button.action-footer-btn.timer:has-text("定时发布")',
+                    'button.action-footer-btn.timer:has-text("预约发布")',
+                    'button.action-footer-btn.timer',
+                    'button:has-text("定时发布")',
+                    'button:has-text("预约发布")',
+                    '[role="button"]:has-text("定时发布")',
+                    '[role="button"]:has-text("预约发布")',
+                ],
+                timeout_ms=3000,
+            )
+            if timer_btn is None:
                 logger.warning("[定时发布] 未找到定时发布按钮!")
+                return False
+
+            logger.info("[定时发布] 准备点击定时发布按钮: selector=%s", timer_selector)
+            await timer_btn.click()
+            modal = page.locator(
+                "div.byte-modal.common-timing-picker.video-publish-timer-picker"
+            ).first
+            try:
+                await modal.wait_for(state="visible", timeout=5000)
+            except Exception:
+                logger.warning("[定时发布] 点击按钮后未出现定时发布弹窗")
+                return False
+
+            modal_title = await ToutiaoPlatform._read_text(
+                modal.locator(".byte-modal-title").first
+            )
+            logger.info("[定时发布] 已打开定时发布弹窗: title=%s", modal_title)
+            if modal_title != "定时发布":
+                logger.warning("[定时发布] 弹窗标题异常: %s", modal_title)
+                return False
+
+            state = await ToutiaoPlatform._read_schedule_modal_state(modal)
+            logger.info(
+                "[定时发布] 当前值: day=%s hour=%s minute=%s summary=%s",
+                state["day_norm"],
+                state["hour_norm"],
+                state["minute_norm"],
+                state["summary"],
+            )
+            if state["summary_dt"] is None:
+                logger.warning("[定时发布] 无法解析弹窗汇总时间: %s", state["summary"])
+                return False
+
+            if not await ToutiaoPlatform._select_schedule_value(
+                page,
+                modal,
+                field_label="日期",
+                select_selector=".day-select.byte-select",
+                value_selector=".day-select .byte-select-view-value",
+                target_display=target_day,
+                normalizer=ToutiaoPlatform._normalize_day_text,
+            ):
+                logger.warning("[定时发布] 日期选择失败")
+                return False
+
+            if not await ToutiaoPlatform._select_schedule_value(
+                page,
+                modal,
+                field_label="小时",
+                select_selector=".hour-select.byte-select",
+                value_selector=".hour-select .byte-select-view-value",
+                target_display=str(target_hour),
+                normalizer=ToutiaoPlatform._normalize_hour_text,
+            ):
+                logger.warning("[定时发布] 小时选择失败")
+                return False
+
+            if not await ToutiaoPlatform._select_schedule_value(
+                page,
+                modal,
+                field_label="分钟",
+                select_selector=".minute-select.byte-select",
+                value_selector=".minute-select .byte-select-view-value",
+                target_display=f"{target_minute:02d}",
+                normalizer=ToutiaoPlatform._normalize_minute_text,
+            ):
+                logger.warning("[定时发布] 分钟选择失败")
+                return False
+
+            final_state = await ToutiaoPlatform._read_schedule_modal_state(modal)
+            logger.info(
+                "[定时发布] 最终校验: expected_summary=%s actual_summary=%s",
+                target_summary,
+                final_state["summary"],
+            )
+            if not (
+                final_state["day_norm"] == target_day
+                and final_state["hour_norm"] == str(target_hour)
+                and final_state["minute_norm"] == f"{target_minute:02d}"
+                and final_state["summary"] == target_summary
+            ):
+                logger.warning(
+                    "[定时发布] 最终校验失败: day=%s/%s hour=%s/%s minute=%s/%s summary=%s/%s",
+                    final_state["day_norm"],
+                    target_day,
+                    final_state["hour_norm"],
+                    target_hour,
+                    final_state["minute_norm"],
+                    f"{target_minute:02d}",
+                    final_state["summary"],
+                    target_summary,
+                )
+                return False
+
+            confirm_btn = modal.locator(".byte-modal-footer button.byte-btn-primary").first
+            if not await confirm_btn.count():
+                logger.warning("[定时发布] 未找到定时确认按钮")
+                return False
+            confirm_text = await ToutiaoPlatform._read_text(confirm_btn)
+            if "定时发布" not in confirm_text:
+                logger.warning("[定时发布] 定时确认按钮文本异常: %s", confirm_text)
+                return False
+            logger.info("[定时发布] 准备点击弹窗确认按钮: text=%s", confirm_text)
+            await confirm_btn.click()
+            modal_closed = await ToutiaoPlatform._wait_modal_hidden(modal)
+            if not modal_closed:
+                logger.warning("[定时发布] 点击确认后弹窗未关闭")
+                return False
+            logger.info("[定时发布] 定时发布弹窗确认完成")
+            return True
         except Exception as e:
             logger.error("[定时发布] 设置定时发布时间失败: %s", e)
+            return False
