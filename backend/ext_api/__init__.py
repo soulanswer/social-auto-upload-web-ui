@@ -33,7 +33,7 @@ _PLATFORM_ID_TO_NAME = {
     1: "小红书", 2: "视频号", 3: "抖音", 4: "快手", 5: "B站",
     6: "百家号", 7: "TikTok", 8: "YouTube", 9: "腾讯视频",
     10: "爱奇艺", 11: "微博", 12: "支付宝", 13: "今日头条", 14: "知乎",
-    15: "CSDN",
+    15: "CSDN", 16: "VIVO",
 }
 
 # 平台 key(拼音) → 中文名称。修复 publish_details.platform 历史脏数据:
@@ -45,7 +45,7 @@ _PLATFORM_KEY_TO_NAME = {
     "tiktok": "TikTok", "youtube": "YouTube",
     "tencent_video": "腾讯视频", "iqiyi": "爱奇艺",
     "weibo": "微博", "alipay": "支付宝", "toutiao": "今日头条", "zhihu": "知乎",
-    "csdn": "CSDN",
+    "csdn": "CSDN", "vivo": "VIVO",
 }
 
 # SSE 订阅者
@@ -1090,7 +1090,8 @@ def _extract_draft_title(draft_data):
     """从草稿数据中提取标题（第一个非空的平台标题）"""
     pc = draft_data.get('platformConfigs', {})
     for key in ['douyin', 'xiaohongshu', 'kuaishou', 'bilibili', 'channels',
-                'baijiahao', 'tiktok', 'youtube', 'iqiyi', 'tencent_video']:
+                'baijiahao', 'tiktok', 'youtube', 'iqiyi', 'tencent_video',
+                'weibo', 'alipay', 'toutiao', 'zhihu', 'csdn', 'vivo']:
         title = pc.get(key, {}).get('title', '')
         if title and title.strip():
             return title.strip()[:100]

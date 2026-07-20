@@ -21,7 +21,7 @@ def test_declaration_platforms_keys():
     assert set(DECLARATION_PLATFORMS.keys()) == {
         'xiaohongshu', 'douyin', 'kuaishou',
         'bilibili', 'baijiahao', 'tencent_video', 'iqiyi',
-        'youtube',
+        'weibo', 'alipay', 'toutiao', 'youtube',
     }
 
 
@@ -512,3 +512,49 @@ def test_build_kwargs_audience_default():
     kw = build_platform_kwargs({}, {}, FakeAccountForBuild())
     assert kw['audience'] == 'not_kids'
     assert kw['altered_content'] is False
+
+
+def test_build_kwargs_channel_specific_fields():
+    merged = {
+        'isOriginal': True,
+        'contentStatement': 'self-made',
+        'weiboCollection': 'weibo-col-a',
+        'authorStatement': 'no-label-needed',
+        'compilation': 'alipay-col-a',
+        'reprintUrl': 'https://alipay.example/reprint',
+        'biliRepostSource': 'https://bili.example',
+        'channelsMarkTag': 'mark-self',
+        'channelsShootDate': '2026-07-20',
+        'channelsShootRegion': ['CN', 'GD', 'SZ'],
+        'channelsRepostSource': 'xinhua',
+        'enableGenerateImage': False,
+        'collection': 'toutiao-collection',
+        'extendLink': True,
+        'extendLinkUrl': 'https://example.com',
+        'vivoLocationName': 'shenzhen-bay',
+        'vivoDistribution': True,
+        'vivoDeclaration': 'no-label',
+        'vivoPrivacy': 'public',
+        'vivoDownloadPermission': 'allow',
+    }
+    kw = build_platform_kwargs(merged, {}, FakeAccountForBuild())
+    assert kw['is_original'] is True
+    assert kw['content_statement'] == 'self-made'
+    assert kw['weibo_collection'] == 'weibo-col-a'
+    assert kw['author_statement'] == 'no-label-needed'
+    assert kw['compilation'] == 'alipay-col-a'
+    assert kw['reprint_url'] == 'https://alipay.example/reprint'
+    assert kw['bili_repost_source'] == 'https://bili.example'
+    assert kw['channels_mark_tag'] == 'mark-self'
+    assert kw['channels_shoot_date'] == '2026-07-20'
+    assert kw['channels_shoot_region'] == ['CN', 'GD', 'SZ']
+    assert kw['channels_repost_source'] == 'xinhua'
+    assert kw['enable_generate_image'] is False
+    assert kw['collection_id'] == 'toutiao-collection'
+    assert kw['extend_link'] is True
+    assert kw['extend_link_url'] == 'https://example.com'
+    assert kw['vivo_location_name'] == 'shenzhen-bay'
+    assert kw['vivo_distribution'] is True
+    assert kw['vivo_declaration'] == 'no-label'
+    assert kw['vivo_privacy'] == 'public'
+    assert kw['vivo_download_permission'] == 'allow'

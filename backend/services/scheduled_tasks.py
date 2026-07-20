@@ -41,6 +41,7 @@ PLATFORM_ID_TO_KEY = {
     13: "toutiao",
     14: "zhihu",
     15: "csdn",
+    16: "vivo",
 }
 
 PLATFORM_KEY_TO_NAME = {
@@ -59,6 +60,7 @@ PLATFORM_KEY_TO_NAME = {
     "toutiao": "今日头条",
     "zhihu": "知乎",
     "csdn": "CSDN",
+    "vivo": "VIVO",
 }
 
 INVALID_ERROR_CODES = {"account_missing", "snapshot_invalid", "video_missing", "cover_missing"}
@@ -285,6 +287,7 @@ def _derive_task_title(snapshot_data: dict, selected_titles: list[str] | None = 
         "toutiao",
         "zhihu",
         "csdn",
+        "vivo",
     ]:
         title = (platform_configs.get(key) or {}).get("title", "")
         if title and str(title).strip():
