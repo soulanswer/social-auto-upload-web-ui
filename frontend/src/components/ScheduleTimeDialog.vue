@@ -50,22 +50,38 @@ watch(
   () => props.modelValue,
   (visible) => {
     if (visible) {
-      scheduledAt.value = props.task?.scheduled_at || ''
+      scheduledAt.value = props.task?.scheduled_at || getDefaultScheduledAt()
     }
   }
 )
 
-/** 禁止选择今天之前的日期 */
 function disabledDate(date) {
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   return date.getTime() < today.getTime()
 }
 
-/** 确认保存发布时间 */
+function getDefaultScheduledAt() {
+  // 后端要求发布时间必须晚于当前时刻，默认给一个接近当前时间的可保存值。
+  return formatDateTime(new Date(Date.now() + 60 * 1000))
+}
+
+function formatDateTime(date) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function parseDateTime(value) {
+  return new Date(String(value).replace(' ', 'T'))
+}
+
 function handleConfirm() {
   if (!scheduledAt.value) {
     ElMessage.warning('请选择发布时间')
+    return
+  }
+  if (parseDateTime(scheduledAt.value).getTime() <= Date.now()) {
+    ElMessage.warning('发布时间必须晚于当前时间')
     return
   }
   emit('confirm', scheduledAt.value)
