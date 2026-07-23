@@ -512,6 +512,7 @@ const isAccountDisabled = (account) => {
 }
 
 const activeTagId = ref(null)
+const hasInitializedTagFilter = ref(false)
 const tagPopoverVisible = ref(false)
 const tagPopoverAccountId = ref(null)
 
@@ -519,6 +520,25 @@ const tagPopoverAccountId = ref(null)
 const tagOverflowMap = ref({})
 
 const tagFilterOptions = computed(() => accountStore.allTags)
+
+watch(tagFilterOptions, (tags) => {
+  if (!tags.length) {
+    activeTagId.value = null
+    hasInitializedTagFilter.value = false
+    return
+  }
+
+  if (tags.some(tag => tag.id === activeTagId.value)) {
+    hasInitializedTagFilter.value = true
+    return
+  }
+
+  if (!hasInitializedTagFilter.value || activeTagId.value !== null) {
+    activeTagId.value = tags[0].id
+  }
+
+  hasInitializedTagFilter.value = true
+}, { immediate: true })
 
 function openTagPopover(accountId) {
   tagPopoverAccountId.value = accountId
