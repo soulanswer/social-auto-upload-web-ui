@@ -376,6 +376,7 @@ def test_validate_image_draft_happy_path():
 class FakeAccountForBuild:
     def __init__(self, file_path='/cookies/x1'):
         self.file_path = file_path
+        self.platform = 'douyin'
 
 
 def test_build_kwargs_title_and_desc_renamed():
@@ -478,6 +479,30 @@ def test_build_kwargs_category_uses_zone_or_isoriginal():
     merged = {'zone': '', 'isOriginal': False}
     kw = build_platform_kwargs(merged, {}, FakeAccountForBuild())
     assert kw['category'] == 0
+
+
+def test_build_kwargs_weibo_uses_weibo_specific_fields():
+    account = FakeAccountForBuild()
+    account.platform = 'weibo'
+    merged = {
+        'videoType': '转载',
+        'weiboCategory': ['影视', '剪辑'],
+        'contentStatement': '内容为转载',
+        'weiboCollectionName': 'weibo-col-a',
+    }
+    kw = build_platform_kwargs(merged, {}, account)
+    assert kw['ai_content'] == '转载'
+    assert kw['category'] == ['影视', '剪辑']
+    assert kw['content_statement'] == '内容为转载'
+    assert kw['weibo_collection'] == 'weibo-col-a'
+
+
+def test_build_kwargs_zhihu_uses_zhihu_category():
+    account = FakeAccountForBuild()
+    account.platform = 'zhihu'
+    merged = {'category': '科技互联网', 'isOriginal': False}
+    kw = build_platform_kwargs(merged, {}, account)
+    assert kw['category'] == '科技互联网'
 
 
 def test_build_kwargs_account_file():

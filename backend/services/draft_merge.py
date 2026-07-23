@@ -124,10 +124,11 @@ def merge_config(common, platform_default, platform_ov, account_ov):
     for field in [
         'creationDeclaration', 'riskWarning', 'enableCashActivity',
         'supplementaryDeclaration', 'audience', 'alteredContent',
-        'zone', 'activityId', 'hotspotId', 'hotspotData', 'selectedTag',
+        'zone', 'category', 'activityId', 'hotspotId', 'hotspotData', 'selectedTag',
         'tagType', 'tagValue', 'mixId', 'mixData', 'topic', 'isDraft',
         'location', 'collection', 'groupChat', 'contentStatement',
-        'weiboCollection', 'authorStatement', 'compilation', 'reprintUrl',
+        'videoType', 'weiboCategory', 'weiboCollection', 'weiboCollectionName',
+        'authorStatement', 'compilation', 'reprintUrl',
         'biliRepostSource',
         'collectionId', 'collectionName', 'xhsSourceType',
         'xhsShootLocation', 'xhsShootDate', 'xhsRepostSource',
@@ -335,10 +336,15 @@ def build_platform_kwargs(merged, common, account):
     else:
         creation_declaration = ''
 
-    # category: zone 优先（B 站），否则 isOriginal ? 1 : 0
+    platform_key = getattr(account, 'platform', '') if account else ''
+    # category: 微博/知乎走各自字段；B 站走 zone；其余兜底 isOriginal ? 1 : 0
     zone = merged.get('zone') or ''
     is_original = merged.get('isOriginal')
-    if zone:
+    if platform_key == 'weibo':
+        category = merged.get('weiboCategory') or []
+    elif platform_key == 'zhihu':
+        category = merged.get('category') or ''
+    elif zone:
         category = zone
     else:
         category = 1 if is_original else 0
@@ -372,12 +378,12 @@ def build_platform_kwargs(merged, common, account):
         'productLink': merged.get('productLink', '') or '',
         'productTitle': merged.get('productTitle', '') or '',
         'content_statement': merged.get('contentStatement', '') or '',
-        'weibo_collection': merged.get('weiboCollection', '') or '',
+        'weibo_collection': merged.get('weiboCollectionName', '') or merged.get('weiboCollection', '') or '',
         'author_statement': merged.get('authorStatement', '') or '',
         'compilation': merged.get('compilation', '') or '',
         'reprint_url': merged.get('reprintUrl', '') or '',
         'schedule_time_str': schedule_time_str,
-        'ai_content': merged.get('aiContent', '') or '',
+        'ai_content': (merged.get('videoType') if platform_key == 'weibo' else merged.get('aiContent', '')) or '',
         'is_original': bool(merged.get('isOriginal')),
         'creation_declaration': creation_declaration,
         'bili_repost_source': merged.get('biliRepostSource', '') or '',
