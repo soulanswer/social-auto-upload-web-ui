@@ -5,9 +5,9 @@ dist/
 build/
 venv/
 .venv/
-backend-mcp/npm-cache
-frontend/npm-cache
 node_modules/
+frontend/npm-cache
+backend-mcp/npm-cache
 .vscode/
 .idea/
 data/db/*.db
@@ -23,7 +23,6 @@ Thumbs.db
 data/logs/*
 data/data/logs/*
 data/*
-
 
 # Tauri
 src-tauri/target/
@@ -46,7 +45,7 @@ data/materials/*
 data/upload_chunks
 backend/bin/
 
-# 启动脚本临时文件
+# Startup script temp files
 .backend_deps_hash
 .frontend_deps_hash
 .mcp_deps_hash
@@ -55,11 +54,12 @@ backend/bin/
 .mcp.pid
 backend.log
 frontend.log
-mcp.logdependency/
+mcp.log
+dependency/
 dependency*
 QianFan*
 *.log
 AGENTS.md
 
-# ZCode 工具配置
+# ZCode config
 .zcode/

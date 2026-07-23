@@ -262,7 +262,25 @@
               </div>
             </template>
 
-            <!-- 视频号专属卡片(合集为账号级,选中账号后才显示) -->
+            <!-- 视频号平台级字段(选中平台就显示,无需先选账号) -->
+            <template v-if="selectedPlatform === 'channels'">
+              <div class="setting-card" :style="{ borderColor: currentPlatformConfig.color + '26', background: currentPlatformConfig.color + '0a' }">
+                <div class="setting-label" :style="{ color: currentPlatformConfig.color }">活动</div>
+                <RemoteSearchSelect
+                  v-model="form.channelsActivityName"
+                  :data="form.channelsActivityData"
+                  :fetcher="fetchChannelsActivities"
+                  :field-map="channelsActivityFieldMap"
+                  search-mode="backend"
+                  empty-behavior="block"
+                  placeholder="输入活动名称搜索"
+                  search-placeholder="输入活动关键词,按回车搜索"
+                  @change="handleChannelsActivityChange"
+                />
+              </div>
+            </template>
+
+            <!-- 视频号账号级字段(选中账号后才显示) -->
             <template v-if="selectedPlatform === 'channels' && isCurrentAccountPersonalized">
               <div class="setting-card" :style="{ borderColor: currentPlatformConfig.color + '26', background: currentPlatformConfig.color + '0a' }">
                 <div class="setting-label" :style="{ color: currentPlatformConfig.color }">选择合集</div>
@@ -933,6 +951,10 @@ function mergeConfig(common, platformDefault, platformOv, accountOv) {
     // 视频号位置(账号级,空=不显示位置)
     channelsLocationName: accountOv?.channelsLocationName ?? platformOv?.channelsLocationName ?? platformDefault?.channelsLocationName ?? '',
     channelsLocationData: accountOv?.channelsLocationData ?? platformOv?.channelsLocationData ?? platformDefault?.channelsLocationData ?? null,
+    // 视频号活动:虽然卡片按平台级显示,但 watch(form) 把值回写到 accountOverrides
+    // (与合集/位置同模式),所以 4 级合并才能取到草稿恢复后的值
+    channelsActivityName: accountOv?.channelsActivityName ?? platformOv?.channelsActivityName ?? platformDefault?.channelsActivityName ?? '',
+    channelsActivityData: accountOv?.channelsActivityData ?? platformOv?.channelsActivityData ?? platformDefault?.channelsActivityData ?? null,
     // 视频号视频标注(平台级):所有选项(含「无需标注」)都会去页面真正选中
     channelsMarkTag: accountOv?.channelsMarkTag ?? platformOv?.channelsMarkTag ?? platformDefault?.channelsMarkTag ?? '无需标注',
     channelsShootDate: accountOv?.channelsShootDate ?? platformOv?.channelsShootDate ?? platformDefault?.channelsShootDate ?? '',
@@ -1002,7 +1024,7 @@ const platformConfigs = reactive({
   xiaohongshu: { title: '', description: '', aiContent: '', isOriginal: false, scheduleTime: '', tags: [], collectionId: '', collectionName: '', collectionData: null },
   kuaishou: { title: '', description: '', aiContent: '', isOriginal: false, scheduleTime: '', tags: [] },
   bilibili: { title: '', description: '', zone: '', tags: [], creationDeclaration: '', biliRepostSource: '', isOriginal: false, scheduleTime: '', biliCollectionName: '', biliCollectionData: null },
-  channels: { title: '', description: '', isOriginal: false, scheduleTime: '', tags: [], channelsCollectionName: '', channelsCollectionData: null, channelsLocationName: '', channelsLocationData: null, channelsMarkTag: '无需标注', channelsShootDate: '', channelsShootRegion: [], channelsRepostSource: '' },
+  channels: { title: '', description: '', isOriginal: false, scheduleTime: '', tags: [], channelsCollectionName: '', channelsCollectionData: null, channelsLocationName: '', channelsLocationData: null, channelsActivityName: '', channelsActivityData: null, channelsMarkTag: '无需标注', channelsShootDate: '', channelsShootRegion: [], channelsRepostSource: '' },
   baijiahao: { title: '', description: '', isOriginal: false, scheduleTime: '', tags: [] },
   tiktok: { title: '', description: '', aiContent: false, isOriginal: false, scheduleTime: '', tags: [] },
   youtube: { title: '', description: '', audience: 'not_kids', alteredContent: false, scheduleTime: '', tags: [] },
@@ -1175,6 +1197,55 @@ function resetAccountOverride(accountId) {
   delete accountOverrides[accountId]
   syncFormFromCurrentSettings()
   ElMessage.success('已恢复为渠道默认设置')
+}
+
+// 上传视频/选素材时按"左侧选中层级"决定 title 填充范围:
+//   - 选中账号:仅替换该账号的 title(其它字段保留)
+//   - 选中平台:替换所选平台的 title,并替换该平台下所有已勾选账号的 accountOverrides.title
+//   - 什么都没选(默认):替换所有平台的 title + 所有已勾选账号的 accountOverrides.title
+// 直接绕过 watch(form) 的 diff,避免 diff 跳过更新。
+function fillTitleForAccount(accountId, title) {
+  const existing = accountOverrides[accountId]
+  accountOverrides[accountId] = existing
+    ? { ...existing, title }
+    : { title }
+  if (selectedAccountId.value === accountId) {
+    form.title = title
+  }
+}
+
+function fillTitleForPlatform(platformKey, title) {
+  if (platformConfigs[platformKey]) {
+    platformConfigs[platformKey].title = title
+  }
+  // 替换该平台下所有已勾选账号的 accountOverrides.title
+  const group = accountGroups.value.find(g => g.key === platformKey)
+  if (group) {
+    for (const acc of group.accounts) {
+      if (!publishAccountIds.has(acc.id)) continue
+      const existing = accountOverrides[acc.id]
+      accountOverrides[acc.id] = existing
+        ? { ...existing, title }
+        : { title }
+    }
+  }
+  if (selectedPlatform.value === platformKey && !selectedAccountId.value) {
+    form.title = title
+  }
+}
+
+function fillTitleForAllPlatformsAndAccounts(title) {
+  for (const key of Object.keys(platformConfigs)) {
+    platformConfigs[key].title = title
+  }
+  for (const aid of publishAccountIds) {
+    if (accountOverrides[aid]) {
+      accountOverrides[aid] = { ...accountOverrides[aid], title }
+    } else {
+      accountOverrides[aid] = { title }
+    }
+  }
+  form.title = title
 }
 
 // ========== Auto-save ==========
@@ -1453,6 +1524,32 @@ async function fetchChannelsLocations(keyword) {
   return { list: resp.data?.list || [] }
 }
 
+// 视频号活动 —— RemoteSearchSelect 数据源(后端搜索模式,必须传 keyword)
+// DOM: option-item 内 .creator-name(发起人)+ .name(活动名) 两个 span,
+// label 拼成「creator-name + 空格 + name」,desc 单放 .name(后端已分好)
+async function fetchChannelsActivities(keyword) {
+  // 活动是平台级字段:未选账号时退回到该平台第一个账号的 cookie 去搜
+  const aid = selectedAccountId.value
+    || accountStore.accounts.find(a => a.platform === '视频号')?.id
+    || ''
+  const resp = await channelsApi.searchActivities(aid, keyword || '')
+  return { list: resp.data?.list || [] }
+}
+const channelsActivityFieldMap = {
+  key: 'activity_id',
+  label: 'name',
+  desc: (item) => item.creator_name ? `发起人: ${item.creator_name}` : ''
+}
+
+// 视频号活动选择回调:存完整对象到 form.channelsActivityData
+function handleChannelsActivityChange(act) {
+  if (act) {
+    form.channelsActivityData = act
+  } else {
+    form.channelsActivityData = null
+  }
+}
+
 // ========== Init ==========
 const firstGroup = accountGroups.value.find(g => g.accounts.length > 0)
 if (firstGroup) {
@@ -1628,11 +1725,17 @@ function syncSelectionAfterPublishAccountsChange(options = {}) {
 
 function toggleGroup(key) {
   if (expandedGroups.value.has(key)) {
+    // 再次点击已展开的平台:收起并取消平台选中
     expandedGroups.value.delete(key)
+    if (selectedPlatform.value === key) {
+      selectedPlatform.value = null
+    }
   } else {
+    // 互斥展开:收起所有其它平台,只展开当前平台,并设为选中
+    expandedGroups.value.clear()
     expandedGroups.value.add(key)
+    selectedPlatform.value = key
   }
-  selectedPlatform.value = key
   selectedAccountId.value = null
 }
 
@@ -1651,6 +1754,8 @@ function removePublishAccount(id) {
 function selectAccount(account, group) {
   selectedAccountId.value = account.id
   selectedPlatform.value = group.key
+  // 互斥展开:只展开账号所属平台
+  expandedGroups.value.clear()
   expandedGroups.value.add(group.key)
 }
 
@@ -1764,23 +1869,15 @@ async function onVideoUploaded(d) {
   ElMessage.success('视频上传成功')
   if (appStore.autoFillTitle) {
     const title = videoData.name.replace(/\.[^.]+$/, '')
-    if (selectedAccountId.value && accountChecked[selectedAccountId.value]) {
-      // 账号级别：只更新 form.title（form watcher 会把 diff 写到 accountOverrides）
-      form.title = title
-    } else if (selectedPlatform.value && platformChecked[selectedPlatform.value]) {
-      // 渠道级别：只更新当前渠道的 title
-      if (platformConfigs[selectedPlatform.value]) {
-        platformConfigs[selectedPlatform.value].title = title
-        form.title = title
-      }
+    if (selectedAccountId.value) {
+      // 选中账号:仅替换该账号的 title
+      fillTitleForAccount(selectedAccountId.value, title)
+    } else if (selectedPlatform.value) {
+      // 选中平台:替换所选平台 + 该平台下所有已勾选账号的 title
+      fillTitleForPlatform(selectedPlatform.value, title)
     } else {
-      // 公共：同步所有渠道（原逻辑）
-      for (const key of Object.keys(platformConfigs)) {
-        platformConfigs[key].title = title
-      }
-      if (selectedPlatform.value && platformConfigs[selectedPlatform.value]) {
-        form.title = platformConfigs[selectedPlatform.value].title
-      }
+      // 什么都没选(默认):全量替换所有平台 + 所有已勾选账号的 title
+      fillTitleForAllPlatformsAndAccounts(title)
     }
   }
   triggerFrameExtraction(videoData, videoUploadTarget.value)
@@ -1821,23 +1918,15 @@ function onMaterialSelect(material) {
     ElMessage.success('视频已设置')
     if (appStore.autoFillTitle) {
       const title = material.name.replace(/\.[^.]+$/, '')
-      if (selectedAccountId.value && accountChecked[selectedAccountId.value]) {
-        // 账号级别：只更新 form.title（form watcher 会写到 accountOverrides）
-        form.title = title
-      } else if (selectedPlatform.value && platformChecked[selectedPlatform.value]) {
-        // 渠道级别：只更新当前渠道
-        if (platformConfigs[selectedPlatform.value]) {
-          platformConfigs[selectedPlatform.value].title = title
-          form.title = title
-        }
+      if (selectedAccountId.value) {
+        // 选中账号:仅替换该账号的 title
+        fillTitleForAccount(selectedAccountId.value, title)
+      } else if (selectedPlatform.value) {
+        // 选中平台:替换所选平台 + 该平台下所有已勾选账号的 title
+        fillTitleForPlatform(selectedPlatform.value, title)
       } else {
-        // 公共：同步所有渠道
-        for (const key of Object.keys(platformConfigs)) {
-          platformConfigs[key].title = title
-        }
-        if (selectedPlatform.value && platformConfigs[selectedPlatform.value]) {
-          form.title = platformConfigs[selectedPlatform.value].title
-        }
+        // 什么都没选(默认):全量替换所有平台 + 所有已勾选账号的 title
+        fillTitleForAllPlatformsAndAccounts(title)
       }
     }
     triggerFrameExtraction(material, materialLibraryVideoTarget.value)
@@ -2775,6 +2864,8 @@ async function publishAll() {
         channelsCollectionName: merged.channelsCollectionName || '',
         // 视频号位置(账号级,空=不显示位置)
         channelsLocationName: merged.channelsLocationName || '',
+        // 视频号活动(账号级,空=不参与活动)
+        channelsActivityName: merged.channelsActivityName || '',
         // 视频号视频标注(平台级):tagName 文本,后端据此在发布页下拉里选中对应项
         channelsMarkTag: merged.channelsMarkTag || '无需标注',
         channelsShootDate: merged.channelsShootDate || '',

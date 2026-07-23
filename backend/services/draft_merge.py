@@ -132,7 +132,7 @@ def merge_config(common, platform_default, platform_ov, account_ov):
         'collectionId', 'collectionName', 'xhsSourceType',
         'xhsShootLocation', 'xhsShootDate', 'xhsRepostSource',
         'biliCollectionName', 'channelsCollectionName', 'channelsLocationName',
-        'channelsMarkTag', 'channelsShootDate', 'channelsShootRegion',
+        'channelsActivityName', 'channelsActivityData', 'channelsMarkTag', 'channelsShootDate', 'channelsShootRegion',
         'channelsRepostSource', 'enableGenerateImage', 'extendLink',
         'extendLinkUrl', 'recommend', 'vivoLocationName', 'vivoLocationData',
         'vivoDistribution', 'vivoDeclaration', 'vivoPrivacy',
@@ -407,6 +407,8 @@ def build_platform_kwargs(merged, common, account):
         'channels_collection_name': merged.get('channelsCollectionName', '') or '',
         # 视频号位置(平台级,空=不显示位置)
         'channels_location_name': merged.get('channelsLocationName', '') or '',
+        'channels_activity_name': merged.get('channelsActivityName', '') or '',
+        'channels_activity_id': ((merged.get('channelsActivityData') or {}).get('activity_id', '')) or '',
         'channels_mark_tag': merged.get('channelsMarkTag', '无需标注') or '无需标注',
         'channels_shoot_date': merged.get('channelsShootDate', '') or '',
         'channels_shoot_region': merged.get('channelsShootRegion') or [],

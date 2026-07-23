@@ -1,153 +1,144 @@
-# PR: feat(v1.2.2) VIVO 平台接入 + 封面系统重构 + 10 平台稳定性修复
+# PR: feat(v1.3.0) 定时任务主线合流 + 账号运营数据同步 + 视频号活动能力并入
 
 ## 概述
 
-本次发布 16 个平台版 VIVO 内容创作平台正式接入，封面系统全面重构（4:3/16:9/3:4/9:16 多比例可设，不再污染素材库），账号运营数据（粉丝/获赞/关注）字段落地，并修复抖音/视频号/支付宝/B 站/百家号/快手/知乎/腾讯视频/头条 9 个平台的关键 Bug。
+这次变更不是单点功能，而是一次 `hn_gx <- master` 的主线整理。
+
+目标很明确：
+
+- 保留 `hn_gx` 的核心能力：定时任务、结构化发布诊断日志、发布时间校验、发布结果判定、账号个性化配置语义
+- 同步 `master` 的最新能力：账号运营数据同步、视频号活动搜索、统一搜索组件优化、左侧栏交互强化、标题自动填充层级语义
+- 将合并后的版本面统一整理成可继续验证和发布的 `v1.3.0`
 
 ---
 
 ## PR 类型
 
-- [x] 新功能（VIVO 平台接入、账号运营数据、封面系统重构、新增赞助页面）
-- [x] Bug 修复（10 个平台 bug + 发布历史封面图 + 个性化选视频 bug + 浏览器关闭智能识别）
-- [x] 工程效率（util/_logger 修复 csdn/vivo 日志路由历史 bug）
-- [x] 文档（v1.2.2 更新日志）
+- [x] 新功能：定时任务全链路、账号运营数据同步、视频号活动参与
+- [x] 合流整合：`hn_gx` 与 `master` 主线能力兼容同步
+- [x] 稳定性增强：结构化诊断日志、发布时间校验、发布结果判定
+- [x] 交互优化：左侧栏互斥展开、选中态强化、标题自动填充按选中层级生效
+- [x] 文档：版本号、PR 文档、changelog 重写为合并后真实状态
 
 ---
 
 ## 核心变更
 
-### 1. VIVO 内容创作平台接入（`backend/impl/vivo/`）
+### 1. 定时任务全链路继续以 `hn_gx` 为主线
 
-新增 `VivoPlatform`（platform_id=16），继承 `BasePlatform`，注册到 `registry.py`：
+- 发布中心支持导入当前配置到定时任务
+- 新增定时任务列表、详情、重跑、删除、排期设置
+- SSE 实时刷新任务状态
+- 草稿合并和任务标题映射继续沿用 `hn_gx` 逻辑
 
-- **创作者中心**：`https://www.kaixinkan.com.cn/#/home`
-- **视频发布**：`https://www.kaixinkan.com.cn/#/content/uploads`
-- **规范**：视频大小≤2G、时长≤90min、描述≤500字
-- **完整发布流程**：
-  1. 扫码登录（可见浏览器 + 轮询 `.user-info-area` 出现判定成功）
-  2. 资料同步（昵称/头像/粉丝/获赞，关注固定 0）
-  3. 上传视频文件（`input[type=file]`，轮询 `.success-text:has-text("上传成功")`，**4 小时超时**）
-  4. 描述+标签（contenteditable 逐字符输入；`#xxx` 末尾空格激活话题）
-  5. 3:4 竖版封面（点编辑封面 → 切上传 tab → 上传 → 处理裁剪 → div 确定）
-  6. 位置（`.sel-position-module` → 输入关键词 → 解析 `.position-list li`）
-  7. 作品同步（`label.el-checkbox` 文案定位勾选）
-  8. 自主声明（`div.el-select-dropdown__item` 文案匹配）
-  9. 谁可以看 / 下载权限（radio by label + option text）
-  10. 定时发布（直接 fill 两个文本框：yyyy-MM-dd + HH:mm）
-  11. 提交 → URL 跳转判定成功
-- **严格遵守**：所有 selector 用产品语义 class（`.user-info-area` / `.cover-photo-img` / `.sel-position-module` 等），**禁用 `data-v-xxx` 随机字符串**
+### 2. 同步 `master` 的账号运营数据能力
 
-### 2. 账号运营数据（粉丝 / 获赞 / 关注）
+- 账号管理页保留运营数据卡片展示
+- `sync_profile` 统一兼容 `dict{name, avatar, stats}` 契约
+- 视频号、支付宝等平台在同步资料时，同时保留 `hn_gx` 的 `storage_state` 回写和 `master` 的 `stats` 抓取
 
-- `user_info` 表新增 `fans/likes/follows` 三列（幂等迁移，默认 0）
-- `BasePlatform.sync_profile` 约定支持 5 元组返回（向后兼容 2 元组）：
-  - 2 元组 `(name, avatar)` — 旧平台
-  - 5 元组 `(name, avatar, fans, likes, follows)` — 新平台（如 VIVO）
-- `save_login_result` / `syncProfile` 路由 / `setAccounts` store 全部按元组长度兼容解包写库
-- 前端账号卡片底部展示「粉丝 N · 获赞 N · 关注 N」，其余平台字段保留为 0 待后续版本接入
+### 3. 视频号活动能力正式并入主线
 
-### 3. VIVO 位置搜索自动化（`/api/vivo/search-position`）
+- 发布页新增视频号“活动”搜索卡片
+- 后端新增 `/api/channels/activities`
+- 定时任务 / 草稿合并链路补齐 `channelsActivityName` 和 `channelsActivityData`
+- 直接发布与定时任务发布两条链路使用同一套活动字段
 
-- 仿 `xiaohongshu_bp.py` 模式：浏览器自动化打开 VIVO 发布页 → 上传测试视频触发表单 → 在 `.sel-position-module` 输入关键词 → 解析 `.position-list li` 的 `.position-name` + `.position-info`
-- 前端 `VivoPositionSelect.vue` 复用模式与小红书 POI 一致，空值即不显示位置
+### 4. 左侧栏交互和标题自动填充语义同步到 `hn_gx`
 
-### 4. 封面系统全面重构
+- 左侧平台改为互斥展开 / 收起
+- 左侧账号选中态视觉强化
+- 自动填充标题按当前选中层级生效：
+  - 选中账号：只替换当前账号标题
+  - 选中平台：替换当前平台及其已勾选账号标题
+  - 未选中：全量替换所有平台和已勾选账号标题
 
-- **封面不再保存到素材库**（避免占用不必要资源），改为临时处理
-- 4:3 / 16:9 / 3:4 / 9:16 四种比例可按视频方向自动选择
-- 头条 / 腾讯视频 / 知乎 / 视频号 / 快手 已按方向自动选择新尺寸
-- CSDN 固定横版、百家号固定横竖各一
-- 爱奇艺封面弹窗新增 16:9 横封面 tab
-- 封面弹窗尺寸 tab 改造 + 布局重设计 + 亮色样式修复
-- 封面裁剪改为两个独立面板，确认时统一校验裁剪结果
+### 5. 发布稳定性增强保持 `hn_gx` 优先
 
-### 5. 10 个平台稳定性修复
+- 保留结构化发布诊断日志工具与请求结果日志
+- 保留头条号、腾讯视频、支付宝等平台的发布时间校验与发布结果判定增强
+- 保留登录校验和资料同步后的 `storage_state` 回写策略
 
-| 平台 | 修复内容 |
-|---|---|
-| 抖音 | 定时发布时间丢失 → Semi 时间滚轮选时/分 |
-| 视频号 | 封面遍历所有入口 + 横版封面 popover 处理 |
-| 支付宝 | 作者声明 radio 改点 label（antd5 受控组件）；新增转载来源联动 |
-| B 站 | 创作声明=转载时新增必填转载来源 |
-| 百家号 | 固定 16:9 横版 + 3:4 竖版 |
-| 快手 | 视频封面前按方向选裁剪比例 |
-| 知乎 | 横版视频优先 16:9 封面 |
-| 腾讯视频 | 封面按方向 + UploadNotify 4h 超时 + 永远等的 formTitle 移除 |
-| 头条 | 封面按方向选 16:9/9:16 + 二次确认弹窗精确点确定按钮 |
-| 全平台 | 浏览器关闭智能识别（disarm 标志），手动关浏览器不再卡死 |
+### 6. 搜索组件与发布细节优化同步保留
 
-### 6. 体验优化
-
-- 亮色模式账号选中字体改用品牌紫，亮色下不再发白看不清
-- 勾选账号个性化后首次从素材库选视频不显示（`getMergedSettings` filter 漏过滤 null 修复）
-- 发布历史封面图显示修复（`_resolve_cover_from_path` 修复 `covers/` 前缀路径）
-- 新增赞助作者页面（侧边栏底部品牌色菜单 + 支付宝/微信收款码 + 顶部徽章心跳红点）
-
-### 7. 工程效率
-
-- `util/_logger.CHANNELS` 补全 csdn + vivo，修复日志路由缺失历史 bug（csdn 平台之前的日志也丢了）
+- `RemoteSearchSelect` 支持 2 秒自动搜索
+- 下拉项卡片式布局与紧凑间距优化
+- 小红书拍摄地点改为统一公共组件
+- 小红书 / 视频号标签输入稳定性修复同步保留
 
 ---
 
-## 涉及文件
+## 已接受的混合解法
 
-```
-后端新增(3 个):
-  backend/impl/vivo/__init__.py
-  backend/impl/vivo/platform.py            (540 行)
-  backend/blueprints/vivo_bp.py            (167 行)
+这 4 个文件已经明确采用“`hn_gx` 为主、`master` 补缺”的混合策略：
 
-后端修改(10 个):
-  backend/init_db.py                       user_info 新增 3 列迁移
-  backend/impl/base_platform.py            sync_profile 文档说明 5 元组
-  backend/impl/_utils.py                   scrape_vivo_profile + save_login_result 兼容
-  backend/impl/registry.py                 注册 VivoPlatform
-  backend/util/_logger.py                  CHANNELS 补 csdn+vivo
-  backend/util/video_limits.py             vivo 校验规则
-  backend/app.py                           PLATFORM_MAP + blueprint + publish kwargs
-  backend/ext_api/__init__.py              硬编码字典补 vivo (修草稿箱显示)
-  backend/blueprints/image_publish_bp.py   platform_map 补 vivo
+- `frontend/src/views/AccountManagement.vue`
+- `frontend/src/views/PublishCenter.vue`
+- `backend/impl/channels/platform.py`
+- `backend/impl/alipay/platform.py`
 
-前端新增(3 个):
-  frontend/src/api/vivo.js
-  frontend/src/components/vivo/PositionSelect.vue
-  frontend/src/assets/logos/vivo.svg       (3.4KB, Vite 内联到 bundle)
+对应原则：
 
-前端修改(6 个):
-  frontend/src/config/platforms.js         VIVO 配置
-  frontend/src/config/videoLimits.js      vivo 镜像规则
-  frontend/src/stores/account.js           索引偏移适配
-  frontend/src/views/AccountManagement.vue 账号卡片显示粉丝/获赞/关注
-  frontend/src/views/PublishCenter.vue     集成 + poiSelect 分流
-  frontend/src/components/PrePublishCheckDialog.vue  platformTypeToKey
-
-文档 + 资源:
-  versions                                 1.2.1 → 1.2.2
-  changelog/20260719.html                  v1.2.2 更新日志页面
-  frontend/src/assets/alipay.jpg + weixin.jpg  赞助页面收款码
-```
+- `hn_gx` 负责保住主链路和行为语义
+- `master` 负责补进 `hn_gx` 原本没有的新能力
 
 ---
 
-## 验证
+## 重点文件
 
-- ✅ 后端 Python 语法 OK
-- ✅ VIVO 平台通过 registry 成功加载（platform_id=16）
-- ✅ scrape_vivo_profile / PLATFORM_SYNC_URLS / VIDEO_LIMITS 注册正确
-- ✅ 数据库迁移成功（3 列添加，幂等无报错）
-- ✅ 前端 `npm run build` 成功（18.82s）
-- ✅ vivo.svg 内联为 data URI 进入 bundle
-- ✅ 实际登录/扫码流程验证通过
-- ✅ 实际视频发布流程（dry_run 模式）验证通过：描述+标签+封面+位置+作品同步+自主声明+定时发布 全部正常填写
-- ✅ 草稿箱显示「VIVO」+ vivo 图标（修复「平台16」问题）
+### 冲突后保留混合结果
 
-## 兼容性
+- `frontend/src/views/PublishCenter.vue`
+- `frontend/src/views/AccountManagement.vue`
+- `backend/impl/channels/platform.py`
+- `backend/impl/alipay/platform.py`
 
-- ✅ 旧平台 sync_profile 返回 2 元组仍正常工作（save_login_result / syncProfile 路由按元组长度兼容解包）
-- ✅ 账号 store.setAccounts 按新列顺序索引映射（id/type/filePath/userName/status/avatar/fans/likes/follows/tags），向后兼容
-- ✅ logger CHANNELS 补全后，csdn 平台日志也恢复正常（顺带修复历史 bug）
+### 自动合并后仍需重点回归
+
+- `backend/app.py`
+- `backend/blueprints/channels_bp.py`
+- `backend/impl/toutiao/platform.py`
+- `backend/impl/tencent_video/platform.py`
+- `frontend/src/components/AccountSidebar.vue`
+- `frontend/src/stores/account.js`
+- `backend/services/draft_merge.py`
 
 ---
 
-**37 个提交 · 104 文件 · 9774 行新增**
+## 需要重点验证
+
+- 账号资料同步：
+  - 支付宝 `stats + storage_state`
+  - 视频号 `stats + storage_state`
+- 发布中心：
+  - 视频号活动
+  - 视频号合集 / 位置
+  - 自动填充标题按选中层级生效
+- 定时任务：
+  - 导入当前发布配置
+  - 新建任务
+  - 详情查看
+  - SSE 实时刷新
+  - 定时任务执行时视频号活动字段不丢失
+- 平台稳定性：
+  - 头条号发布时间校验与结果判定
+  - 腾讯视频未绑定弹窗与定时发布时间选择
+  - 小红书 / 视频号标签输入稳定性
+
+---
+
+## 当前状态
+
+- 已完成 `master -> hn_gx` 的工作区合并
+- 已解决 4 个文本冲突并保留混合方案
+- 已把版本号和文档切到合并后的真实版本面
+- 尚未创建最终 merge commit
+- 尚未完成完整回归验证
+
+---
+
+## 建议后续动作
+
+1. 先跑 `draft_merge` / `scheduled_tasks` 相关测试，确认视频号活动字段在定时任务链路中可用
+2. 再跑前端构建，确认发布中心和账号管理页编译无误
+3. 最后做一轮发布中心 + 定时任务的冒烟回归，再提交 merge commit

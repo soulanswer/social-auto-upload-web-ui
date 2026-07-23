@@ -523,6 +523,8 @@ def test_build_kwargs_channel_specific_fields():
         'compilation': 'alipay-col-a',
         'reprintUrl': 'https://alipay.example/reprint',
         'biliRepostSource': 'https://bili.example',
+        'channelsActivityName': 'summer-camp',
+        'channelsActivityData': {'activity_id': 'summer-camp|channels-official'},
         'channelsMarkTag': 'mark-self',
         'channelsShootDate': '2026-07-20',
         'channelsShootRegion': ['CN', 'GD', 'SZ'],
@@ -545,6 +547,8 @@ def test_build_kwargs_channel_specific_fields():
     assert kw['compilation'] == 'alipay-col-a'
     assert kw['reprint_url'] == 'https://alipay.example/reprint'
     assert kw['bili_repost_source'] == 'https://bili.example'
+    assert kw['channels_activity_name'] == 'summer-camp'
+    assert kw['channels_activity_id'] == 'summer-camp|channels-official'
     assert kw['channels_mark_tag'] == 'mark-self'
     assert kw['channels_shoot_date'] == '2026-07-20'
     assert kw['channels_shoot_region'] == ['CN', 'GD', 'SZ']

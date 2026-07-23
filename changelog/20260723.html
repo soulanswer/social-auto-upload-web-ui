@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>v1.3.0 合并发布说明</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@500;700;800;900&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: rgba(255, 255, 255, 0.9);
+      --panel-strong: #ffffff;
+      --text: #10213b;
+      --muted: #5c6c87;
+      --line: rgba(16, 33, 59, 0.12);
+      --brand: #1d6fff;
+      --brand-2: #14b37d;
+      --brand-3: #f97316;
+      --shadow: 0 20px 50px rgba(16, 33, 59, 0.08);
+      --radius: 22px;
+      --title: "Rubik", sans-serif;
+      --body: "Noto Sans SC", sans-serif;
+      --mono: "JetBrains Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--body);
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(29, 111, 255, 0.14), transparent 34%),
+        radial-gradient(circle at top right, rgba(20, 179, 125, 0.12), transparent 28%),
+        linear-gradient(180deg, #f7fafe 0%, #eef3f9 100%);
+    }
+
+    .shell {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 32px auto 48px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 56px 56px 40px;
+      border: 1px solid rgba(255, 255, 255, 0.75);
+      border-radius: 32px;
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.92), rgba(245, 249, 255, 0.86)),
+        linear-gradient(135deg, rgba(29, 111, 255, 0.08), transparent 45%);
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -80px -120px auto;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(29, 111, 255, 0.14), transparent 70%);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(29, 111, 255, 0.08);
+      color: var(--brand);
+      font: 700 13px var(--mono);
+      letter-spacing: 0.04em;
+    }
+
+    .hero h1 {
+      margin: 18px 0 10px;
+      font: 900 clamp(48px, 9vw, 108px) / 0.92 var(--title);
+      letter-spacing: -0.06em;
+    }
+
+    .hero h1 span {
+      color: var(--brand);
+    }
+
+    .hero h2 {
+      margin: 0 0 18px;
+      max-width: 860px;
+      font: 800 clamp(22px, 3vw, 34px) / 1.2 var(--body);
+    }
+
+    .hero p {
+      max-width: 880px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.8;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 26px;
+    }
+
+    .chip {
+      padding: 10px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .chip strong {
+      color: var(--text);
+      font-family: var(--mono);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .card {
+      padding: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: 0 12px 32px rgba(16, 33, 59, 0.06);
+      backdrop-filter: blur(12px);
+    }
+
+    .span-6 { grid-column: span 6; }
+    .span-4 { grid-column: span 4; }
+    .span-12 { grid-column: span 12; }
+
+    .label {
+      margin-bottom: 10px;
+      color: var(--brand);
+      font: 700 12px var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font: 800 24px var(--body);
+    }
+
+    .card p,
+    .card li {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.75;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    li + li {
+      margin-top: 8px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .mini {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--panel-strong);
+    }
+
+    .mini h4 {
+      margin: 0 0 8px;
+      font: 800 16px var(--body);
+    }
+
+    .mini.keep h4 { color: var(--brand-2); }
+    .mini.sync h4 { color: var(--brand); }
+    .mini.risk h4 { color: var(--brand-3); }
+
+    .timeline {
+      display: grid;
+      gap: 14px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 88px 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .step .num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 38px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--brand), #6ba4ff);
+      color: #fff;
+      font: 700 14px var(--mono);
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 16px;
+      color: var(--text);
+    }
+
+    .footer {
+      margin-top: 22px;
+      padding: 22px 24px;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.8;
+    }
+
+    @media (max-width: 900px) {
+      .hero {
+        padding: 36px 22px 26px;
+      }
+
+      .span-6,
+      .span-4,
+      .span-12 {
+        grid-column: span 12;
+      }
+
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .step {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">MERGED RELEASE · 2026-07-23</div>
+      <h1>v<span>1.3.0</span></h1>
+      <h2>定时任务主线并入发布主流程，账号运营数据与视频号活动能力同步到同一版本面</h2>
+      <p>
+        这是一次真正的合流版发布说明，而不是 upstream <strong>v1.2.3</strong> 的重复包装。
+        本版同时保留 <strong>hn_gx</strong> 的定时任务、诊断日志、发布时间校验与结果判定，
+        并同步 <strong>master</strong> 的账号运营数据、视频号活动搜索、左侧栏交互强化和标题自动填充层级语义。
+      </p>
+      <div class="meta">
+        <div class="chip"><strong>主线版本</strong> 1.3.0</div>
+        <div class="chip"><strong>合流方向</strong> hn_gx ← master</div>
+        <div class="chip"><strong>核心原则</strong> hn_gx 为主，master 补缺</div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card span-6">
+        <div class="label">New Core</div>
+        <h3>这次真正新增 / 并入了什么</h3>
+        <ul>
+          <li>定时任务全链路：导入发布配置、新建任务、详情、重跑、SSE 实时刷新。</li>
+          <li>账号运营数据同步：账号管理页支持多平台 stats 卡片展示。</li>
+          <li>视频号活动搜索：发布页可按活动名 / 发起人参与活动，并进入后端发布链路。</li>
+          <li>统一搜索组件优化：2 秒自动搜索、卡片式布局、紧凑间距和更稳定的标签输入。</li>
+        </ul>
+      </article>
+
+      <article class="card span-6">
+        <div class="label">Compatibility</div>
+        <h3>合流时保住了什么</h3>
+        <div class="split">
+          <div class="mini keep">
+            <h4>继续保留 hn_gx 主线</h4>
+            <ul>
+              <li>定时任务调度与详情链路</li>
+              <li>结构化发布诊断日志</li>
+              <li>发布时间校验与结果判定</li>
+              <li>账号个性化配置语义</li>
+            </ul>
+          </div>
+          <div class="mini sync">
+            <h4>同步吸收 master 最新能力</h4>
+            <ul>
+              <li>账号运营数据卡片</li>
+              <li>视频号活动搜索与匹配</li>
+              <li>左侧栏互斥展开和选中态强化</li>
+              <li>标题自动填充按选中层级生效</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="card span-4">
+        <div class="label">Mixed Files</div>
+        <h3>已采用混合解法的文件</h3>
+        <ul>
+          <li><code>PublishCenter.vue</code></li>
+          <li><code>AccountManagement.vue</code></li>
+          <li><code>channels/platform.py</code></li>
+          <li><code>alipay/platform.py</code></li>
+        </ul>
+      </article>
+
+      <article class="card span-4">
+        <div class="label">Stability</div>
+        <h3>重点稳定性增强</h3>
+        <ul>
+          <li>头条号定时发布时间校验和结果判定增强</li>
+          <li>腾讯视频未绑定弹窗与发布时间选择修复</li>
+          <li>登录校验 / 资料同步后回写 <code>storage_state</code></li>
+          <li>视频号 / 小红书标签输入稳定性提升</li>
+        </ul>
+      </article>
+
+      <article class="card span-4">
+        <div class="label">UI Behavior</div>
+        <h3>发布页体验变化</h3>
+        <ul>
+          <li>视频号活动字段进入发布页与定时任务链路</li>
+          <li>左侧平台互斥展开，再次点击可收起</li>
+          <li>账号选中态更醒目，操作层级更清晰</li>
+          <li>自动填充标题不再默认粗暴全量覆盖</li>
+        </ul>
+      </article>
+
+      <article class="card span-12">
+        <div class="label">Release Notes</div>
+        <h3>合并后应优先回归的场景</h3>
+        <div class="timeline">
+          <div class="step">
+            <div class="num">01</div>
+            <div>
+              <strong>账号资料同步</strong>
+              <p>优先确认支付宝和视频号账号资料同步时，`stats` 和 `storage_state` 都能正确回写。</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="num">02</div>
+            <div>
+              <strong>发布中心直接发布</strong>
+              <p>重点检查视频号活动、合集、位置、标题自动填充层级，以及账号个性化模式下的字段写入语义。</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="num">03</div>
+            <div>
+              <strong>定时任务链路</strong>
+              <p>验证导入发布配置、新建任务、详情查看、SSE 实时刷新，以及视频号活动字段在定时执行时不丢失。</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="num">04</div>
+            <div>
+              <strong>平台稳定性回归</strong>
+              <p>至少复测头条号、腾讯视频、小红书、视频号这几条近期变更最密集的路径。</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card span-12">
+        <div class="label">Decision</div>
+        <h3>版本结论</h3>
+        <div class="split">
+          <div class="mini risk">
+            <h4>为什么不是 upstream v1.2.3</h4>
+            <p>
+              因为当前工作区已经不仅包含 upstream 的账号数据和视频号活动，
+              还包含 `hn_gx` 的定时任务、诊断日志、发布时间校验、结果判定与多项平台修复。
+              继续沿用 <code>1.2.3</code> 会低估这次发布的真实范围。
+            </p>
+          </div>
+          <div class="mini sync">
+            <h4>为什么定为 v1.3.0</h4>
+            <p>
+              这是一次主线能力面重组：新增的不是单一 patch，而是“发布中心 + 定时任务 + 多平台数据同步 + 行为语义”的合流，
+              用一个新的 minor 版本表达更准确。
+            </p>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <div class="footer">
+      当前说明对应 <strong>2026-07-23</strong> 的合并发布版状态。
+      如果后续继续补回归结果或再调整版本文档，应基于本页继续迭代，而不是回退到 upstream 的 `20260721 / v1.2.3` 文案。
+    </div>
+  </main>
+</body>
+</html>
