@@ -6,6 +6,8 @@ build/
 venv/
 .venv/
 node_modules/
+frontend/npm-cache
+backend-mcp/npm-cache
 .vscode/
 .idea/
 data/db/*.db
