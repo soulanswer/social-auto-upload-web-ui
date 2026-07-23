@@ -115,7 +115,7 @@
                   <div v-if="field.description" class="field-desc">{{ field.description }}</div>
 
                   <el-input
-                    v-if="field.type === 'input'"
+                    v-if="field.type === 'input' || field.type === 'poiSelect' || field.type === 'compilationSelect'"
                     v-model="currentTemplate[field.key]"
                     :placeholder="field.placeholder"
                   />
@@ -229,8 +229,8 @@ import { platformList } from '@/config/platforms'
 import { splitTagInput } from '@/utils/tag-input'
 
 const TEMPLATE_SETTINGS_KEY = 'videoPublishDefaults'
-const TEMPLATE_UNSUPPORTED_TYPES = new Set(['poiSelect', 'compilationSelect'])
-const TEMPLATE_EXCLUDED_KEYS = new Set(['title', 'description', 'videoFormat'])
+const TEMPLATE_UNSUPPORTED_TYPES = new Set()
+const TEMPLATE_EXCLUDED_KEYS = new Set(['title', 'description'])
 
 function cloneTemplateValue(value) {
   if (Array.isArray(value)) return [...value]
@@ -256,19 +256,57 @@ function getTemplateFields(platform) {
   })
 }
 
-function createTemplateConfig(platform) {
-  const defaults = platform.defaultSettings || {}
-  const config = {
-    title: defaults.title || '',
-    description: defaults.description || '',
-    tags: Array.isArray(defaults.tags) ? [...defaults.tags] : [],
+function normalizeTemplateConfig(platform, rawConfig = {}) {
+  const config = {}
+
+  for (const [key, value] of Object.entries(rawConfig || {})) {
+    config[key] = cloneTemplateValue(value)
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(config, 'title')) {
+    config.title = ''
+  }
+  if (!Object.prototype.hasOwnProperty.call(config, 'description')) {
+    config.description = ''
+  }
+  if (!Array.isArray(config.tags)) {
+    config.tags = []
   }
 
   for (const field of getTemplateFields(platform)) {
-    config[field.key] = getTemplateFieldInitialValue(field, platform)
+    if (!Object.prototype.hasOwnProperty.call(config, field.key)) {
+      config[field.key] = getTemplateFieldInitialValue(field, platform)
+    }
+
+    if (field.type === 'multiSelect' || field.type === 'cascader') {
+      if (!Array.isArray(config[field.key])) {
+        config[field.key] = []
+      }
+      continue
+    }
+
+    if (field.type === 'switch') {
+      if (typeof config[field.key] !== 'boolean') {
+        config[field.key] = false
+      }
+      continue
+    }
+
+    if (field.type === 'select' || field.type === 'radio') {
+      const options = Array.isArray(field.options) ? field.options : []
+      const value = config[field.key]
+      if (value !== '' && value !== null && value !== undefined && !options.some((opt) => opt.value === value)) {
+        config[field.key] = ''
+      }
+    }
   }
 
   return config
+}
+
+function createTemplateConfig(platform) {
+  const defaults = platform.defaultSettings || {}
+  return normalizeTemplateConfig(platform, defaults)
 }
 
 function normalizeTemplateSettings(rawSettings) {
@@ -338,11 +376,16 @@ function removeTemplateTag(index) {
 function applySavedTemplateSettings(rawSettings) {
   const settings = normalizeTemplateSettings(rawSettings)
   for (const [platformKey, savedConfig] of Object.entries(settings)) {
-    if (!templateConfigs[platformKey] || !savedConfig || typeof savedConfig !== 'object') continue
+    const platform = templatePlatforms.find((item) => item.key === platformKey)
+    if (!templateConfigs[platformKey] || !platform || !savedConfig || typeof savedConfig !== 'object') continue
+    const normalized = normalizeTemplateConfig(platform, savedConfig)
     for (const key of Object.keys(templateConfigs[platformKey])) {
-      if (Object.prototype.hasOwnProperty.call(savedConfig, key)) {
-        templateConfigs[platformKey][key] = cloneTemplateValue(savedConfig[key])
+      if (!Object.prototype.hasOwnProperty.call(normalized, key)) {
+        delete templateConfigs[platformKey][key]
       }
+    }
+    for (const [key, value] of Object.entries(normalized)) {
+      templateConfigs[platformKey][key] = cloneTemplateValue(value)
     }
   }
 }

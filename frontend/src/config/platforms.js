@@ -76,6 +76,7 @@ export const PLATFORMS = {
     cssClass: 'channels',
     creatorUrl: 'https://channels.weixin.qq.com/',
     settingsFields: [
+      { key: 'channelsActivityName', label: '活动', type: 'input', placeholder: '输入活动名称，发布时按名称搜索匹配', description: '默认值页只保存活动名称，实际发布时会按名称搜索匹配活动' },
       // 视频标注:发布页「选择视频标注」下拉,所有选项(含「无需标注」)都会去页面真正选中。
       { key: 'channelsMarkTag', label: '视频标注', type: 'select', placeholder: '选择视频标注',
         options: CHANNELS_MARK_TAGS.map(t => ({ label: t.tagName, value: t.tagName })) },
@@ -120,6 +121,7 @@ export const PLATFORMS = {
       ] },
       { key: 'isOriginal', label: '原创声明', type: 'radio', options: [{ label: '原创', value: true }, { label: '非原创', value: false }] },
       { key: 'scheduleTime', label: '定时发布', type: 'datetime', placeholder: '选择时间' },
+      { key: 'videoFormat', label: '视频格式', type: 'radio', options: [{ label: '横版', value: 'landscape' }, { label: '竖版', value: 'portrait' }] },
     ],
     defaultSettings: { title: '', description: '', tags: [], aiContent: '', isOriginal: false, scheduleTime: '', videoFormat: '' },
   },
@@ -140,7 +142,7 @@ export const PLATFORMS = {
       { key: 'scheduleTime', label: '定时发布', type: 'datetime', placeholder: '选择时间' },
       { key: 'videoFormat', label: '视频格式', type: 'radio', options: [{ label: '横版', value: 'landscape' }, { label: '竖版', value: 'portrait' }] },
     ],
-    defaultSettings: { title: '', description: '', aiContent: false, isOriginal: false, scheduleTime: '', videoFormat: '' },
+    defaultSettings: { title: '', description: '', aiContent: '', isOriginal: false, scheduleTime: '', videoFormat: '' },
   },
   BILIBILI: {
     id: 5,
@@ -330,7 +332,7 @@ export const PLATFORMS = {
       { key: 'scheduleTime', label: '定时发布', type: 'datetime', placeholder: '选择时间' },
       { key: 'videoFormat', label: '视频格式', type: 'radio', options: [{ label: '横版', value: 'landscape' }, { label: '竖版', value: 'portrait' }] },
     ],
-    defaultSettings: { title: '', description: '', creationDeclaration: '', scheduleTime: '', videoFormat: '' },
+    defaultSettings: { title: '', description: '', creationDeclaration: [], scheduleTime: '', videoFormat: '' },
   },
   IQIYI: {
     id: 10,
@@ -483,7 +485,7 @@ export const PLATFORMS = {
       },
       { key: 'videoFormat', label: '视频格式', type: 'radio', options: [{ label: '横版', value: 'landscape' }, { label: '竖版', value: 'portrait' }] },
     ],
-    defaultSettings: { title: '', description: '', creationDeclaration: [], enableGenerateImage: true, collection: '', extendLink: false, extendLinkUrl: '', scheduleTime: '', videoFormat: '' },
+    defaultSettings: { title: '', description: '', creationDeclaration: '', enableGenerateImage: true, collection: '', extendLink: false, extendLinkUrl: '', scheduleTime: '', videoFormat: '' },
   },
   ZHIHU: {
     id: 14,
@@ -587,6 +589,7 @@ export const PLATFORMS = {
     cssClass: 'csdn',
     creatorUrl: 'https://mp.csdn.net/',
     settingsFields: [
+      { key: 'scheduleTime', label: '定时发布', type: 'datetime', placeholder: '选择时间' },
       { key: 'recommend', label: '是否推荐', type: 'switch', description: '勾选后发布的视频将被推荐' },
     ],
     defaultSettings: { title: '', description: '', recommend: false, scheduleTime: '' },
