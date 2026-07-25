@@ -269,30 +269,27 @@ def _derive_task_title(snapshot_data: dict, selected_titles: list[str] | None = 
             clean_title = str(title or "").strip()
             if clean_title:
                 return clean_title[:100]
-
-    platform_configs = snapshot_data.get("platformConfigs") or {}
-    for key in [
-        "douyin",
-        "xiaohongshu",
-        "kuaishou",
-        "bilibili",
-        "channels",
-        "baijiahao",
-        "tiktok",
-        "youtube",
-        "iqiyi",
-        "tencent_video",
-        "weibo",
-        "alipay",
-        "toutiao",
-        "zhihu",
-        "csdn",
-        "vivo",
-    ]:
-        title = (platform_configs.get(key) or {}).get("title", "")
-        if title and str(title).strip():
-            return str(title).strip()[:100]
     return "未命名任务"
+
+
+def _is_override_enabled(checked: dict, identifier: int | str) -> bool:
+    """快照中的覆写仅在对应开关启用时参与合并。"""
+    value = checked.get(str(identifier), checked.get(identifier))
+    return value is True or value == 1
+
+
+def _get_effective_overrides(snapshot: dict, platform_key: str, account_id: int) -> tuple[dict, dict]:
+    """按发布页的覆写开关读取渠道和账号配置。"""
+    platform_override = {}
+    if _is_override_enabled(snapshot.get("platformChecked") or {}, platform_key):
+        platform_override = (snapshot.get("platformOverrides") or {}).get(platform_key) or {}
+
+    account_override = {}
+    if _is_override_enabled(snapshot.get("accountChecked") or {}, account_id):
+        overrides = snapshot.get("accountOverrides") or {}
+        account_override = overrides.get(str(account_id), overrides.get(account_id)) or {}
+
+    return platform_override, account_override
 
 
 def _build_task_metadata(conn: sqlite3.Connection, snapshot_data: dict) -> dict:
@@ -301,8 +298,6 @@ def _build_task_metadata(conn: sqlite3.Connection, snapshot_data: dict) -> dict:
     publish_account_ids = snapshot.get("publishAccountIds") or []
     common = snapshot.get("commonConfig") or {}
     platform_configs = snapshot.get("platformConfigs") or {}
-    platform_overrides = snapshot.get("platformOverrides") or {}
-    account_overrides = snapshot.get("accountOverrides") or {}
 
     selected_titles = []
     tag_values = []
@@ -320,11 +315,12 @@ def _build_task_metadata(conn: sqlite3.Connection, snapshot_data: dict) -> dict:
         platform_name = PLATFORM_KEY_TO_NAME.get(platform_key, "未知平台")
         if platform_name not in channel_names:
             channel_names.append(platform_name)
+        platform_override, account_override = _get_effective_overrides(snapshot, platform_key, account_id)
         merged = merge_config(
             common,
             platform_configs.get(platform_key) or {},
-            platform_overrides.get(platform_key) or {},
-            account_overrides.get(str(account_id)) or account_overrides.get(account_id) or {},
+            platform_override,
+            account_override,
         )
         merged_title = str(merged.get("title") or "").strip()
         if merged_title:
@@ -1014,8 +1010,6 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
         publish_account_ids = snapshot.get("publishAccountIds") or []
         common = snapshot.get("commonConfig") or {}
         platform_configs = snapshot.get("platformConfigs") or {}
-        platform_overrides = snapshot.get("platformOverrides") or {}
-        account_overrides = snapshot.get("accountOverrides") or {}
 
         if not publish_account_ids:
             conn.execute(
@@ -1131,11 +1125,12 @@ def dispatch_task(task_id: str, *, allowed_statuses: set[str]) -> dict:
         platform_key = PLATFORM_ID_TO_KEY.get(record.get("type"), "")
         platform_name = PLATFORM_KEY_TO_NAME.get(platform_key, "未知平台")
         account_name = record.get("userName") or f"账号{account_id}"
+        platform_override, account_override = _get_effective_overrides(snapshot, platform_key, account_id)
         merged = merge_config(
             common,
             platform_configs.get(platform_key) or {},
-            platform_overrides.get(platform_key) or {},
-            account_overrides.get(str(account_id)) or account_overrides.get(account_id) or {},
+            platform_override,
+            account_override,
         )
 
         step_logs.append(

@@ -5,6 +5,7 @@ import sys
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +31,12 @@ def _setup_db():
         """
         INSERT INTO user_info (id, type, filePath, userName, status, avatar)
         VALUES (1, 3, 'douyin-1.json', '账号A', 1, '')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO user_info (id, type, filePath, userName, status, avatar)
+        VALUES (2, 1, 'xiaohongshu-2.json', '账号B', 1, '')
         """
     )
     conn.commit()
@@ -114,9 +121,10 @@ class TestScheduledTasksEndpoints(unittest.TestCase):
         self.assertEqual(data['status'], 'draft')
 
         task_id = data['id']
+        scheduled_at = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         resp = self.client.patch(
             f'/api/v2/scheduled-tasks/{task_id}/schedule',
-            json={"scheduled_at": "2026-07-18 21:30:00"},
+            json={"scheduled_at": scheduled_at},
         )
         self.assertEqual(resp.status_code, 200)
 
@@ -127,7 +135,59 @@ class TestScheduledTasksEndpoints(unittest.TestCase):
         ).fetchone()
         conn.close()
         self.assertEqual(row[0], 'scheduled')
-        self.assertEqual(row[1], "2026-07-18 21:30:00")
+        self.assertEqual(row[1], scheduled_at)
+
+    def test_task_title_uses_first_account_and_dispatch_keeps_each_account_title(self):
+        """列表取首账号标题，派发仍使用每个账号各自的有效标题。"""
+        snapshot = _build_snapshot()
+        snapshot["platformConfigs"]["xiaohongshu"] = {
+            "title": "小红书渠道标题",
+            "description": "小红书描述",
+            "tags": [],
+            "aiContent": "内容由AI生成",
+        }
+        snapshot["accountOverrides"] = {"1": {"title": "抖音账号标题"}}
+        snapshot["accountChecked"] = {"1": True}
+        snapshot["publishAccountIds"] = [1, 2]
+
+        resp = self.client.post(
+            '/api/v2/scheduled-tasks/import',
+            json={"task_note": "", "snapshot_data": snapshot},
+        )
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.get_json()['data']['id']
+
+        list_resp = self.client.get('/api/v2/scheduled-tasks')
+        item = next(row for row in list_resp.get_json()['data']['items'] if row['id'] == task_id)
+        self.assertEqual(item['title'], '抖音账号标题')
+        self.assertEqual(item['task_name'], '抖音账号标题 定时任务')
+
+        queued_tasks = []
+        with patch('services.scheduled_tasks.check_cookie_by_record', return_value=(True, 'Cookie 有效')):
+            with patch('ext_api.task_queue.get_task_queue') as get_queue:
+                get_queue.return_value.add_task.side_effect = queued_tasks.append
+                run_resp = self.client.post(f'/api/v2/scheduled-tasks/{task_id}/run-now')
+
+        self.assertEqual(run_resp.status_code, 200)
+        tasks_by_account = {task.account_id: task for task in queued_tasks}
+        self.assertEqual(tasks_by_account[1].title, '抖音账号标题')
+        self.assertEqual(tasks_by_account[2].title, '小红书渠道标题')
+
+    def test_draft_card_title_uses_first_account_effective_title(self):
+        """草稿卡片标题应取首个发布账号的实际表单标题。"""
+        snapshot = _build_snapshot()
+        snapshot["accountOverrides"] = {"1": {"title": "账号表单标题"}}
+        snapshot["accountChecked"] = {"1": True}
+
+        create_resp = self.client.post('/api/v2/drafts', json={"draft_data": snapshot})
+        self.assertEqual(create_resp.status_code, 200)
+        self.assertEqual(create_resp.get_json()['data']['title'], '账号表单标题')
+
+        list_resp = self.client.get('/api/v2/drafts?type=video')
+        self.assertEqual(list_resp.status_code, 200)
+        draft_id = create_resp.get_json()['data']['id']
+        draft = next(item for item in list_resp.get_json()['data'] if item['id'] == draft_id)
+        self.assertEqual(draft['title'], '账号表单标题')
 
     def test_run_now_cookie_invalid_skips_current_account_and_writes_logs(self):
         """Cookie 无效时，只失败当前账号，并写入失败原因和操作日志。"""

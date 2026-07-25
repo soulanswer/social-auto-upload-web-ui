@@ -1980,20 +1980,6 @@ function serializePublishSnapshot() {
   }
 }
 
-function buildScheduledTaskName(snapshotData) {
-  const accountIds = snapshotData.publishAccountIds || []
-  for (const rawId of accountIds) {
-    const account = accountStore.accounts.find(item => item.id === rawId)
-    if (!account) continue
-    const platformKey = platformNameToKey[account.platform]
-    if (!platformKey) continue
-    const config = snapshotData.platformConfigs?.[platformKey] || {}
-    const title = (config.title || '').trim()
-    if (title) return `${title} 定时任务`
-  }
-  return '未命名定时任务'
-}
-
 async function saveDraft() {
   try {
     const draftData = serializePublishSnapshot()
@@ -2018,7 +2004,6 @@ async function importScheduledTask() {
   try {
     const snapshotData = serializePublishSnapshot()
     await scheduledTasksApi.importTask({
-      task_name: buildScheduledTaskName(snapshotData),
       task_note: '',
       snapshot_data: snapshotData,
     })
