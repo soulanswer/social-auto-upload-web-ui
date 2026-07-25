@@ -48,6 +48,12 @@ _PLATFORM_KEY_TO_NAME = {
     "csdn": "CSDN", "vivo": "VIVO",
 }
 
+_PLATFORM_ID_TO_KEY = {
+    1: "xiaohongshu", 2: "channels", 3: "douyin", 4: "kuaishou", 5: "bilibili",
+    6: "baijiahao", 7: "tiktok", 8: "youtube", 9: "tencent_video", 10: "iqiyi",
+    11: "weibo", 12: "alipay", 13: "toutiao", 14: "zhihu", 15: "csdn", 16: "vivo",
+}
+
 # SSE 订阅者
 _sse_subscribers: list[queue.Queue] = []
 _sse_lock = threading.Lock()
@@ -964,6 +970,7 @@ def get_drafts():
             if d.get('draft_data'):
                 try:
                     dd = json.loads(d['draft_data'])
+                    d['title'] = _extract_draft_title(conn, dd)
                     recomputed = _extract_image_channels_from_draft(conn, dd)
                     if recomputed:
                         d['channels_summary'] = recomputed
@@ -989,14 +996,14 @@ def create_draft():
 
     draft_data = data['draft_data']
     draft_type = data.get('type', 'video')  # 默认视频类型
-    title = _extract_draft_title(draft_data)
-    cover_path = _extract_draft_cover(draft_data)
-    channels_summary = _extract_channels_summary(draft_data)
-    video_duration = _extract_video_duration(draft_data)
-    video_file_size = _extract_video_file_size(draft_data)
 
     try:
         conn = _db_conn()
+        title = _extract_draft_title(conn, draft_data)
+        cover_path = _extract_draft_cover(draft_data)
+        channels_summary = _extract_channels_summary(draft_data)
+        video_duration = _extract_video_duration(draft_data)
+        video_file_size = _extract_video_file_size(draft_data)
         cursor = conn.execute(
             """INSERT INTO drafts (type, title, cover_path, draft_data, channels_summary, video_duration, video_file_size)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -1045,14 +1052,14 @@ def update_draft(draft_id):
         return jsonify({"code": 400, "msg": "草稿数据不能为空"}), 400
 
     draft_data = data['draft_data']
-    title = _extract_draft_title(draft_data)
-    cover_path = _extract_draft_cover(draft_data)
-    channels_summary = _extract_channels_summary(draft_data)
-    video_duration = _extract_video_duration(draft_data)
-    video_file_size = _extract_video_file_size(draft_data)
 
     try:
         conn = _db_conn()
+        title = _extract_draft_title(conn, draft_data)
+        cover_path = _extract_draft_cover(draft_data)
+        channels_summary = _extract_channels_summary(draft_data)
+        video_duration = _extract_video_duration(draft_data)
+        video_file_size = _extract_video_file_size(draft_data)
         changes = conn.execute(
             """UPDATE drafts SET title=?, cover_path=?, draft_data=?, channels_summary=?,
                video_duration=?, video_file_size=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
@@ -1086,15 +1093,52 @@ def delete_draft(draft_id):
 
 # ---------- Draft metadata extraction helpers ----------
 
-def _extract_draft_title(draft_data):
-    """从草稿数据中提取标题（第一个非空的平台标题）"""
-    pc = draft_data.get('platformConfigs', {})
-    for key in ['douyin', 'xiaohongshu', 'kuaishou', 'bilibili', 'channels',
-                'baijiahao', 'tiktok', 'youtube', 'iqiyi', 'tencent_video',
-                'weibo', 'alipay', 'toutiao', 'zhihu', 'csdn', 'vivo']:
-        title = pc.get(key, {}).get('title', '')
-        if title and title.strip():
-            return title.strip()[:100]
+def _is_draft_override_enabled(checked, identifier):
+    """与发布页一致：覆写配置仅在对应开关开启时生效。"""
+    value = (checked or {}).get(str(identifier), (checked or {}).get(identifier))
+    return value is True or value == 1
+
+
+def _extract_draft_title(conn, draft_data):
+    """取首个发布账号的实际表单标题。"""
+    common = draft_data.get('commonConfig') or {}
+    platform_configs = draft_data.get('platformConfigs') or {}
+    platform_overrides = draft_data.get('platformOverrides') or {}
+    account_overrides = draft_data.get('accountOverrides') or {}
+    platform_checked = draft_data.get('platformChecked') or {}
+    account_checked = draft_data.get('accountChecked') or {}
+
+    for raw_account_id in draft_data.get('publishAccountIds') or []:
+        try:
+            account_id = int(raw_account_id)
+        except (TypeError, ValueError):
+            continue
+        row = conn.execute("SELECT type FROM user_info WHERE id = ?", (account_id,)).fetchone()
+        if not row:
+            continue
+        platform_key = _PLATFORM_ID_TO_KEY.get(row['type'], '')
+        if not platform_key:
+            continue
+        platform_override = (
+            platform_overrides.get(platform_key) or {}
+            if _is_draft_override_enabled(platform_checked, platform_key)
+            else {}
+        )
+        account_override = (
+            account_overrides.get(str(account_id), account_overrides.get(account_id)) or {}
+            if _is_draft_override_enabled(account_checked, account_id)
+            else {}
+        )
+        title = str(
+            merge_config(
+                common,
+                platform_configs.get(platform_key) or {},
+                platform_override,
+                account_override,
+            ).get('title') or ''
+        ).strip()
+        if title:
+            return title[:100]
     return '无标题'
 
 
