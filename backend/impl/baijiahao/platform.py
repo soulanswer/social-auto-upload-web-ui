@@ -8,6 +8,7 @@ Chromium) with automatic Playwright fallback.
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime
 
@@ -859,6 +860,7 @@ class BaijiahaoPlatform(BasePlatform):
                 f"定时发布失败: 今天发布时小时({publish_date.hour})必须大于当前小时({now.hour})"
             )
 
+        is_today = delta_days == 0
         date_label = f"{publish_date.month}月{publish_date.day}日"
         hour_label = f"{publish_date.hour}点"
         minute_label = f"{publish_date.minute}分"
@@ -867,14 +869,28 @@ class BaijiahaoPlatform(BasePlatform):
             "button", name="定时发布", exact=True
         )
         await schedule_button.click()
-        await page.wait_for_selector("#select-date", timeout=5000)
+        await page.wait_for_selector("#select-hour", timeout=5000)
         await page.wait_for_timeout(500)
 
-        await self._pick_schedule_option(page, "#select-date", date_label)
+        if not is_today:
+            await page.wait_for_selector("#select-date", timeout=5000)
+            await self._pick_schedule_option(
+                page,
+                "#select-date",
+                date_label,
+                target_index=self._get_schedule_date_option_index(delta_days),
+            )
         await self._pick_schedule_option(page, "#select-hour", hour_label)
         await self._pick_schedule_option(page, "#select-minute", minute_label)
 
         await page.wait_for_timeout(500)
+        # Temporarily disabled: Baijiahao RC Select can keep the selected
+        # value outside its input, causing a false-negative before submission.
+        # await self._verify_schedule_publish_selection(
+        #     page,
+        #     publish_date,
+        #     is_today=is_today,
+        # )
         # Confirm button is INSIDE the schedule dialog (not the page-level one)
         await page.locator("div[role='dialog']").get_by_role(
             "button", name="定时发布"
@@ -885,7 +901,21 @@ class BaijiahaoPlatform(BasePlatform):
         )
 
     @staticmethod
-    async def _pick_schedule_option(page, input_id: str, label: str) -> None:
+    def _get_schedule_date_option_index(delta_days: int) -> int:
+        """Return the date selector index, where tomorrow is the first option."""
+        if delta_days < 1 or delta_days > 7:
+            raise ValueError(
+                f"百家号日期下拉索引计算失败: delta_days={delta_days}"
+            )
+        return delta_days - 1
+
+    @staticmethod
+    async def _pick_schedule_option(
+        page,
+        input_id: str,
+        label: str,
+        target_index: int | None = None,
+    ) -> None:
         """Open one of the schedule selects and pick the target option.
 
         Force-clicks the hidden combobox input to open the dropdown, then
@@ -905,46 +935,210 @@ class BaijiahaoPlatform(BasePlatform):
             await page.wait_for_timeout(500)
         await page.wait_for_timeout(500)
 
-        # Read current highlighted index (format: select-{kind}_list_{n})
-        current_id = await page.evaluate(
-            """(selector) => {
-                const input = document.querySelector(selector);
-                return input ? input.getAttribute('aria-activedescendant') : null;
-            }""",
-            input_id,
-        )
-        current_num = 0
-        if current_id:
-            parts = current_id.rsplit("_", 1)
-            if len(parts) == 2 and parts[1].isdigit():
-                current_num = int(parts[1])
+        # The date selector starts at tomorrow.  Its index is passed by the
+        # caller so it cannot accidentally be derived from today's day number.
+        if target_index is not None:
+            current_id = await page.evaluate(
+                """(selector) => {
+                    const input = document.querySelector(selector);
+                    return input
+                        ? input.getAttribute('aria-activedescendant')
+                        : null;
+                }""",
+                input_id,
+            )
+            current_num = 0
+            if current_id:
+                parts = current_id.rsplit("_", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    current_num = int(parts[1])
+            target_num = target_index
+            await page.locator(input_id).focus()
+            await page.wait_for_timeout(200)
 
-        # Compute target list index from label
-        if "分" in label:
-            target_num = int(label.replace("分", ""))
-        elif "点" in label:
-            target_num = int(label.replace("点", ""))
-        elif "日" in label:
-            day = int(label.split("月")[1].replace("日", ""))
-            target_num = day - datetime.now().day
-            if target_num < 0 or target_num > 7:
-                target_num = 0
-        else:
-            target_num = 0
+            diff = target_num - current_num
+            if diff != 0:
+                key = "ArrowDown" if diff > 0 else "ArrowUp"
+                for _ in range(abs(diff)):
+                    await page.keyboard.press(key)
+                    await page.wait_for_timeout(40)
 
-        # Re-focus the combobox so key events are routed to its keydown handler
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(300)
+            return
+
+        target_value = BaijiahaoPlatform._get_schedule_option_number(label)
+        if target_value is None:
+            raise RuntimeError(f"百家号定时下拉值无法解析: {label}")
+
+        # Hour and minute lists can start after the current time.  Navigate by
+        # their displayed value instead of treating a value as a list index.
         await page.locator(input_id).focus()
         await page.wait_for_timeout(200)
+        for _ in range(61):
+            active_label = await BaijiahaoPlatform._read_active_schedule_option(
+                page,
+                input_id,
+            )
+            active_value = BaijiahaoPlatform._get_schedule_option_number(
+                active_label
+            )
+            if active_value is None:
+                raise RuntimeError(
+                    "百家号定时下拉无法读取当前高亮项: "
+                    f"selector={input_id}"
+                )
+            if active_value == target_value:
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(300)
+                return
 
-        diff = target_num - current_num
-        if diff != 0:
-            key = "ArrowDown" if diff > 0 else "ArrowUp"
-            for _ in range(abs(diff)):
-                await page.keyboard.press(key)
-                await page.wait_for_timeout(40)
+            key = "ArrowDown" if active_value < target_value else "ArrowUp"
+            await page.keyboard.press(key)
+            await page.wait_for_timeout(40)
 
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(300)
+        raise RuntimeError(
+            "百家号定时下拉选择超时: "
+            f"selector={input_id}, target={label}"
+        )
+
+    @staticmethod
+    async def _read_active_schedule_option(page, input_id: str) -> str:
+        """Return the visible text of the schedule dropdown's active option."""
+        try:
+            value = await page.locator(input_id).evaluate(
+                """el => {
+                    const activeId = el.getAttribute('aria-activedescendant');
+                    const activeOption = activeId
+                        ? document.getElementById(activeId)
+                        : null;
+                    return activeOption?.getAttribute('title') ||
+                        activeOption?.textContent || '';
+                }"""
+            )
+            return (value or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _get_schedule_option_number(label: str) -> int | None:
+        """Extract the numeric hour or minute represented by a selector label."""
+        values = re.findall(r"\d+", label or "")
+        return int(values[-1]) if values else None
+
+    @staticmethod
+    async def _read_schedule_option_value(page, input_id: str) -> str:
+        """Read the label currently displayed by one schedule selector."""
+        option = page.locator(input_id)
+        try:
+            value = await option.input_value()
+            if value:
+                return value.strip()
+        except Exception:
+            pass
+
+        try:
+            value = await option.evaluate(
+                """el => {
+                    const activeId = el.getAttribute('aria-activedescendant');
+                    const activeOption = activeId
+                        ? document.getElementById(activeId)
+                        : null;
+                    const selectRoot = el.closest('[class*="select"]');
+                    const selectedNode = selectRoot?.querySelector(
+                        '[class*="selection-item"], '
+                        + '[class*="selectionItem"], '
+                        + '[class*="selected"], [title]'
+                    );
+                    const values = [
+                        el.value,
+                        el.getAttribute('value'),
+                        activeOption?.getAttribute('title'),
+                        activeOption?.textContent,
+                        selectedNode?.getAttribute('title'),
+                        selectedNode?.textContent,
+                        el.getAttribute('data-value'),
+                        el.textContent,
+                    ];
+                    return values.find(value => value && value.trim()) || '';
+                }"""
+            )
+            return (value or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _schedule_option_matches(
+        actual_value: str,
+        expected_value: str,
+        field_name: str,
+    ) -> bool:
+        """Compare selector labels while tolerating whitespace and zero padding."""
+        actual = re.sub(r"\s+", "", actual_value or "")
+        expected = re.sub(r"\s+", "", expected_value)
+        if actual == expected:
+            return True
+
+        if field_name == "date":
+            actual_numbers = re.findall(r"\d+", actual)
+            expected_numbers = re.findall(r"\d+", expected)
+            return (
+                len(actual_numbers) >= 2
+                and len(expected_numbers) >= 2
+                and [int(value) for value in actual_numbers[-2:]]
+                == [int(value) for value in expected_numbers[-2:]]
+            )
+
+        actual_numbers = re.findall(r"\d+", actual)
+        expected_numbers = re.findall(r"\d+", expected)
+        return bool(actual_numbers and expected_numbers) and (
+            int(actual_numbers[-1]) == int(expected_numbers[-1])
+        )
+
+    @classmethod
+    async def _verify_schedule_publish_selection(
+        cls,
+        page,
+        publish_date,
+        *,
+        is_today: bool,
+    ) -> None:
+        """Fail before submission when the page does not show the target time."""
+        expected_options = {
+            "hour": ("#select-hour", f"{publish_date.hour}点"),
+            "minute": ("#select-minute", f"{publish_date.minute}分"),
+        }
+        if not is_today:
+            expected_options = {
+                "date": (
+                    "#select-date",
+                    f"{publish_date.month}月{publish_date.day}日",
+                ),
+                **expected_options,
+            }
+
+        mismatches = []
+        for field_name, (input_id, expected_value) in expected_options.items():
+            actual_value = await cls._read_schedule_option_value(page, input_id)
+            if not cls._schedule_option_matches(
+                actual_value,
+                expected_value,
+                field_name,
+            ):
+                mismatches.append(
+                    f"{field_name}: expected={expected_value}, "
+                    f"actual={actual_value or '(empty)'}"
+                )
+
+        if mismatches:
+            raise RuntimeError(
+                "百家号定时发布时间校验失败: " + "; ".join(mismatches)
+            )
+
+        logger.info(
+            "百家号定时发布时间校验通过: %s",
+            publish_date.strftime("%Y-%m-%d %H:%M"),
+        )
 
     # ------------------------------------------------------------------
     # Helper: set custom cover images (landscape + portrait)
