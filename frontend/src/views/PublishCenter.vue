@@ -1780,10 +1780,41 @@ function triggerUploadVideo() {
   videoUploadDialogVisible.value = true
 }
 
+/** 删除视频后，仅清空封面和基础发布字段，保留其余渠道配置。 */
+function clearVideoRelatedPublishData() {
+  for (const key of MEDIA_OVERRIDE_KEYS) {
+    commonConfig[key] = null
+  }
+
+  for (const config of Object.values(platformConfigs)) {
+    config.title = ''
+    config.description = ''
+    config.tags = []
+    config.scheduleTime = ''
+  }
+
+  for (const config of [...Object.values(platformOverrides), ...Object.values(accountOverrides)]) {
+    for (const key of MEDIA_OVERRIDE_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(config, key)) {
+        config[key] = null
+      }
+    }
+    delete config.title
+    delete config.description
+    delete config.tags
+    delete config.scheduleTime
+  }
+
+  tagInput.value = ''
+  landscapeFrames.value = []
+  portraitFrames.value = []
+  syncFormFromCurrentSettings()
+}
+
+/** 删除视频素材，并同步清空所有渠道的封面与基础发布字段。 */
 function clearVideo() {
-  // 移除横竖区分:同时清两个视频字段
-  currentEditTarget.value.videoLandscape = null
-  currentEditTarget.value.videoPortrait = null
+  clearVideoRelatedPublishData()
+  ElMessage.success('已清空视频、封面和基础发布信息')
 }
 
 // ========== Cover Editor ==========
